@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: payguard-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-payguard}
+      POSTGRES_USER: ${POSTGRES_USER:-payguard}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-payguard_dev_password}
+    ports:
+      - "5433:5432"
+    volumes:
+      - payguard_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-payguard} -d ${POSTGRES_DB:-payguard}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    container_name: payguard-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-payguard}:${POSTGRES_PASSWORD:-payguard_dev_password}@postgres:5432/${POSTGRES_DB:-payguard}
+    ports:
+      - "8100:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  frontend:
+    build: ./frontend
+    container_name: payguard-frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8100
+    ports:
+      - "3100:3000"
+    depends_on:
+      - backend
+
+volumes:
+  payguard_postgres_data:
