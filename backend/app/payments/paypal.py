@@ -119,3 +119,61 @@ def extract_capture_id(capture_response: dict) -> str | None:
         return capture_response["purchase_units"][0]["payments"]["captures"][0]["id"]
     except (KeyError, IndexError, TypeError):
         return None
+
+
+# Headers PayPal sends with every webhook, needed for verification.
+WEBHOOK_SIG_HEADERS = (
+    "paypal-transmission-id",
+    "paypal-transmission-time",
+    "paypal-transmission-sig",
+    "paypal-cert-url",
+    "paypal-auth-algo",
+)
+
+
+async def verify_webhook_signature(*, headers: dict, raw_body: bytes) -> bool:
+    """Verify a PayPal webhook using PayPal's verification API.
+
+    Returns True only if PayPal confirms SUCCESS. Never trust a webhook payload
+    that fails this check. Credentials/signatures are never logged.
+    """
+    if not settings.webhook_configured:
+        raise PayPalNotConfigured("PAYPAL_WEBHOOK_ID is not set in .env")
+
+    # Normalize header lookup (case-insensitive).
+    lower = {k.lower(): v for k, v in headers.items()}
+    for h in WEBHOOK_SIG_HEADERS:
+        if h not in lower:
+            return False
+
+    import json as _json
+
+    try:
+        event = _json.loads(raw_body.decode("utf-8"))
+    except Exception:
+        return False
+
+    token = await get_access_token()
+    payload = {
+        "transmission_id": lower["paypal-transmission-id"],
+        "transmission_time": lower["paypal-transmission-time"],
+        "cert_url": lower["paypal-cert-url"],
+        "auth_algo": lower["paypal-auth-algo"],
+        "transmission_sig": lower["paypal-transmission-sig"],
+        "webhook_id": settings.paypal_webhook_id,
+        "webhook_event": event,
+    }
+    req_headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{settings.paypal_base_url}/v1/notifications/verify-webhook-signature",
+            headers=req_headers,
+            json=payload,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json().get("verification_status") == "SUCCESS"

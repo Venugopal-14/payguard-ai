@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,9 +10,21 @@ class Settings(BaseSettings):
         "postgresql+psycopg://payguard:payguard_dev_password@postgres:5432/payguard"
     )
 
+    @field_validator("database_url")
+    @classmethod
+    def _normalize_db_url(cls, v: str) -> str:
+        # Managed providers (e.g. Render) hand out a 'postgres://' URL, but our
+        # SQLAlchemy driver needs the explicit 'postgresql+psycopg://' scheme.
+        if v.startswith("postgres://"):
+            return "postgresql+psycopg://" + v[len("postgres://"):]
+        if v.startswith("postgresql://") and "+psycopg" not in v:
+            return "postgresql+psycopg://" + v[len("postgresql://"):]
+        return v
+
     paypal_base_url: str = "https://api-m.sandbox.paypal.com"
     paypal_client_id: str = ""
     paypal_client_secret: str = ""
+    paypal_webhook_id: str = ""
 
     # Where PayPal redirects the buyer after approval / cancellation.
     frontend_url: str = "http://localhost:3100"
@@ -33,6 +46,10 @@ class Settings(BaseSettings):
     @property
     def paypal_configured(self) -> bool:
         return bool(self.paypal_client_id and self.paypal_client_secret)
+
+    @property
+    def webhook_configured(self) -> bool:
+        return bool(self.paypal_webhook_id)
 
     @property
     def ollama_configured(self) -> bool:

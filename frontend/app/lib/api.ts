@@ -28,11 +28,26 @@ export type AgentView = {
   summary: string;
 };
 
+export type RiskFactor = {
+  factor: string;
+  weight: number;
+  description: string;
+};
+
+export type RiskView = {
+  score: number;
+  level: string;
+  signals: string[];
+  factors: RiskFactor[];
+  explanation: string;
+  recommended_action: string;
+};
+
 export type ProposeResponse = {
   transaction: Transaction;
   agent_source: string;
   agent: AgentView;
-  risk: { score: number; level: string; signals: string[] };
+  risk: RiskView;
   policy_reasons: string[];
 };
 

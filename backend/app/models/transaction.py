@@ -17,6 +17,11 @@ class Transaction(Base):
         ForeignKey("missions.id"), nullable=True
     )
 
+    # Ties this transaction to its full lifecycle (mission -> order -> webhook).
+    correlation_id: Mapped[str | None] = mapped_column(
+        String(64), index=True, nullable=True
+    )
+
     # What is being paid for.
     description: Mapped[str] = mapped_column(String(500), nullable=False)
     merchant: Mapped[str] = mapped_column(String(255), nullable=False)

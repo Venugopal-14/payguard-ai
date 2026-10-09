@@ -19,10 +19,13 @@ import logging
 import re
 from dataclasses import dataclass
 
+import time
+
 import httpx
 from pydantic import ValidationError
 
 from app.agent.schemas import AgentProposal
+from app.core import metrics
 from app.core.config import settings
 
 logger = logging.getLogger("payguard.agent")
@@ -172,19 +175,26 @@ def _propose_with_fallback(
 async def propose_purchase(
     *, instruction: str, budget: float, currency: str = "USD"
 ) -> Proposal:
+    provider = settings.ai_provider
     if settings.ai_configured:
-        logger.info("agent_started provider=%s", settings.ai_provider)
+        logger.info("agent_started provider=%s", provider)
+        start = time.perf_counter()
         try:
             proposal = await _propose_with_llm(instruction, budget, currency)
             if proposal.amount <= 0:
                 raise ValueError("LLM returned a non-positive amount.")
+            metrics.ai_latency_seconds.labels(provider).observe(time.perf_counter() - start)
+            metrics.ai_proposals_total.labels(provider, "success").inc()
             logger.info(
                 "agent_completed provider=%s merchant=%s amount=%s",
                 proposal.provider, proposal.merchant, proposal.amount,
             )
             return proposal
         except Exception as exc:  # noqa: BLE001
+            metrics.ai_latency_seconds.labels(provider).observe(time.perf_counter() - start)
+            metrics.ai_proposals_total.labels(provider, "fallback").inc()
             logger.warning("agent_failed provider=%s error=%s; using fallback",
-                           settings.ai_provider, exc)
+                           provider, exc)
             return _propose_with_fallback(instruction, budget, currency)
+    metrics.ai_proposals_total.labels("fallback", "success").inc()
     return _propose_with_fallback(instruction, budget, currency)

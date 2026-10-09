@@ -41,9 +41,10 @@ def decide(
         )
         return PolicyDecision(BLOCK, reasons)
 
-    if risk.level == "HIGH":
+    if risk.level in ("HIGH", "CRITICAL"):
         reasons.append(
-            f"Risk level is HIGH (score {risk.score}); blocking automatically."
+            f"Risk level is {risk.level} (score {risk.score}); "
+            "blocking automatically."
         )
         return PolicyDecision(BLOCK, reasons)
 

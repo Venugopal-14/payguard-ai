@@ -12,10 +12,19 @@ class MissionRequest(BaseModel):
     approval_threshold: float = Field(default=200, ge=0)
 
 
+class RiskFactorView(BaseModel):
+    factor: str
+    weight: float
+    description: str
+
+
 class RiskView(BaseModel):
     score: float
     level: str
     signals: list[str]
+    factors: list[RiskFactorView] = []
+    explanation: str = ""
+    recommended_action: str = "APPROVE"
 
 
 class TransactionView(BaseModel):
@@ -62,3 +71,18 @@ class ExecuteRequest(BaseModel):
 
 class CaptureRequest(BaseModel):
     transaction_id: int
+
+
+class AuditEventView(BaseModel):
+    id: int
+    transaction_id: int | None
+    correlation_id: str | None
+    event_type: str
+    actor: str
+    previous_state: str | None
+    new_state: str | None
+    reason: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

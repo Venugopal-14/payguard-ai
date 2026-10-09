@@ -19,19 +19,25 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+import uuid
+
 from app.agent.agent import propose_purchase
+from app.core import metrics
 from app.db.database import get_db
-from app.engine import policy
-from app.engine.risk import evaluate_risk
+from app.engine import lifecycle, policy
+from app.engine.risk import HistoryRecord, evaluate_risk
+from app.models.audit_event import AuditEvent
 from app.models.mission import Mission
 from app.models.transaction import Transaction
 from app.payments import paypal
 from app.schemas.payment import (
     AgentView,
+    AuditEventView,
     CaptureRequest,
     ExecuteRequest,
     MissionRequest,
     ProposeResponse,
+    RiskFactorView,
     RiskView,
     TransactionView,
 )
@@ -66,12 +72,27 @@ async def create_mission(req: MissionRequest, db: Session = Depends(get_db)):
         currency=req.currency.upper(),
     )
 
-    # 2. Risk engine evaluates.
+    # 2. Risk engine evaluates (with behavioral history for velocity/baseline).
+    prior = (
+        db.query(Transaction).order_by(Transaction.created_at.desc()).limit(50).all()
+    )
+    history = [
+        HistoryRecord(
+            merchant=t.merchant,
+            amount=float(t.amount),
+            created_at=t.created_at,
+            status=t.status,
+        )
+        for t in prior
+    ]
     risk = evaluate_risk(
         description=proposal.description,
         merchant=proposal.merchant,
         amount=proposal.amount,
         budget=req.budget,
+        currency=proposal.currency,
+        category=proposal.category,
+        history=history,
     )
 
     # 3. Policy engine decides.
@@ -87,8 +108,11 @@ async def create_mission(req: MissionRequest, db: Session = Depends(get_db)):
     reasoning_lines += [f"Policy: {r}" for r in decision.reasons]
     reasoning = "\n".join(reasoning_lines)
 
+    correlation_id = uuid.uuid4().hex
+    initial_status = _STATUS_FOR_DECISION[decision.decision]
     txn = Transaction(
         mission_id=mission.id,
+        correlation_id=correlation_id,
         description=proposal.description,
         merchant=proposal.merchant,
         amount=proposal.amount,
@@ -97,11 +121,44 @@ async def create_mission(req: MissionRequest, db: Session = Depends(get_db)):
         risk_score=risk.score,
         risk_level=risk.level,
         reasoning=reasoning,
-        status=_STATUS_FOR_DECISION[decision.decision],
+        status=initial_status,
     )
     db.add(txn)
     db.commit()
     db.refresh(txn)
+
+    # Metrics.
+    metrics.transactions_total.labels(decision.decision, initial_status).inc()
+    metrics.transaction_value_total.labels(proposal.currency).inc(float(proposal.amount))
+    metrics.risk_evaluations_total.labels(risk.level).inc()
+    metrics.risk_score.observe(float(risk.score))
+    metrics.policy_decisions_total.labels(decision.decision).inc()
+    if decision.decision == policy.NEEDS_APPROVAL:
+        metrics.approval_requests_total.inc()
+
+    # Audit the decision pipeline (AI -> Risk -> Policy -> initial state).
+    lifecycle.record_event(
+        db, transaction_id=txn.id, correlation_id=correlation_id,
+        event_type="PROPOSAL", actor=lifecycle.AI_AGENT,
+        reason=proposal.agent_notes,
+        metadata={"provider": proposal.provider, "confidence": proposal.confidence},
+        commit=False,
+    )
+    lifecycle.record_event(
+        db, transaction_id=txn.id, correlation_id=correlation_id,
+        event_type="RISK_EVALUATED", actor=lifecycle.RISK_ENGINE,
+        reason=risk.explanation,
+        metadata={"score": risk.score, "level": risk.level},
+        commit=False,
+    )
+    lifecycle.record_event(
+        db, transaction_id=txn.id, correlation_id=correlation_id,
+        event_type="POLICY_DECISION", actor=lifecycle.POLICY_ENGINE,
+        new_state=initial_status,
+        reason="; ".join(decision.reasons),
+        commit=False,
+    )
+    db.commit()
 
     return ProposeResponse(
         transaction=TransactionView.model_validate(txn),
@@ -114,7 +171,19 @@ async def create_mission(req: MissionRequest, db: Session = Depends(get_db)):
             confidence=proposal.confidence,
             summary=proposal.agent_notes,
         ),
-        risk=RiskView(score=risk.score, level=risk.level, signals=risk.signals),
+        risk=RiskView(
+            score=risk.score,
+            level=risk.level,
+            signals=risk.signals,
+            factors=[
+                RiskFactorView(
+                    factor=f.factor, weight=f.weight, description=f.description
+                )
+                for f in risk.factors
+            ],
+            explanation=risk.explanation,
+            recommended_action=risk.recommended_action,
+        ),
         policy_reasons=decision.reasons,
     )
 
@@ -129,9 +198,11 @@ def approve_transaction(transaction_id: int, db: Session = Depends(get_db)):
         raise HTTPException(
             400, f"Transaction is {txn.status}, not awaiting approval."
         )
-    txn.status = "APPROVED"
-    db.commit()
-    db.refresh(txn)
+    lifecycle.transition(
+        db, txn, target="APPROVED", actor=lifecycle.USER,
+        event_type="HUMAN_APPROVED", reason="Human approved the transaction.",
+    )
+    metrics.approval_decisions_total.labels("approved").inc()
     return TransactionView.model_validate(txn)
 
 
@@ -158,15 +229,19 @@ async def execute_transaction(req: ExecuteRequest, db: Session = Depends(get_db)
     except paypal.PayPalNotConfigured as exc:
         raise HTTPException(503, str(exc))
     except Exception as exc:  # noqa: BLE001
-        txn.status = "FAILED"
-        db.commit()
+        metrics.paypal_orders_total.labels("error").inc()
+        lifecycle.transition(db, txn, target="FAILED", actor=lifecycle.PAYPAL,
+                             event_type="ORDER_FAILED", reason="PayPal order creation failed.")
         raise HTTPException(502, f"PayPal order creation failed: {exc}")
 
+    metrics.paypal_orders_total.labels("success").inc()
     txn.paypal_order_id = order.get("id")
     txn.approve_url = paypal.extract_approve_url(order)
-    txn.status = "PAYPAL_CREATED"
-    db.commit()
-    db.refresh(txn)
+    lifecycle.transition(
+        db, txn, target="PAYPAL_CREATED", actor=lifecycle.PAYPAL,
+        event_type="ORDER_CREATED", reason="PayPal order created.",
+        metadata={"order_id": order.get("id")},
+    )
     return TransactionView.model_validate(txn)
 
 
@@ -184,12 +259,21 @@ async def capture_transaction(req: CaptureRequest, db: Session = Depends(get_db)
     try:
         result = await paypal.capture_order(txn.paypal_order_id)
     except Exception as exc:  # noqa: BLE001
-        txn.status = "FAILED"
-        db.commit()
+        metrics.paypal_captures_total.labels("error").inc()
+        lifecycle.transition(db, txn, target="FAILED", actor=lifecycle.PAYPAL,
+                             event_type="CAPTURE_FAILED", reason="PayPal capture failed.")
         raise HTTPException(502, f"PayPal capture failed: {exc}")
 
     txn.paypal_capture_id = paypal.extract_capture_id(result)
-    txn.status = "COMPLETED" if result.get("status") == "COMPLETED" else "FAILED"
+    _target = "COMPLETED" if result.get("status") == "COMPLETED" else "FAILED"
+    metrics.paypal_captures_total.labels(
+        "success" if _target == "COMPLETED" else "failed"
+    ).inc()
+    lifecycle.transition(
+        db, txn, target=_target, actor=lifecycle.PAYPAL,
+        event_type="CAPTURE_RESULT", reason=f"Capture returned {result.get('status')}.",
+        metadata={"capture_id": txn.paypal_capture_id},
+    )
     db.commit()
     db.refresh(txn)
     return TransactionView.model_validate(txn)
@@ -209,3 +293,18 @@ def get_transaction(transaction_id: int, db: Session = Depends(get_db)):
     if txn is None:
         raise HTTPException(404, "Transaction not found.")
     return TransactionView.model_validate(txn)
+
+
+@router.get("/transactions/{transaction_id}/audit", response_model=list[AuditEventView])
+def get_transaction_audit(transaction_id: int, db: Session = Depends(get_db)):
+    """Chronological audit timeline for a transaction."""
+    txn = db.get(Transaction, transaction_id)
+    if txn is None:
+        raise HTTPException(404, "Transaction not found.")
+    events = (
+        db.query(AuditEvent)
+        .filter(AuditEvent.transaction_id == transaction_id)
+        .order_by(AuditEvent.created_at.asc(), AuditEvent.id.asc())
+        .all()
+    )
+    return [AuditEventView.model_validate(e) for e in events]

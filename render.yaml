@@ -1,0 +1,55 @@
+# Render Blueprint for PayGuard AI
+# Deploy with: Render Dashboard -> New -> Blueprint -> point at this repo.
+#
+# Secrets (sync: false) must be filled in via the Render dashboard, never here.
+# Ollama is NOT available on Render; set OPENAI_API_KEY for a real AI provider,
+# otherwise the app runs the deterministic rule-based fallback agent.
+
+databases:
+  - name: payguard-db
+    databaseName: payguard
+    user: payguard
+    plan: free
+
+services:
+  # ---------- Backend (FastAPI) ----------
+  - type: web
+    name: payguard-backend
+    runtime: docker
+    plan: free
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: payguard-db
+          property: connectionString
+      - key: PAYPAL_BASE_URL
+        value: https://api-m.sandbox.paypal.com
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: PAYPAL_WEBHOOK_ID
+        sync: false
+      - key: FRONTEND_URL
+        sync: false   # set to the deployed frontend URL after first deploy
+      # AI provider: leave OPENAI_API_KEY blank to use the rule-based fallback.
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_BASE_URL
+        value: https://api.openai.com/v1
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
+
+  # ---------- Frontend (Next.js) ----------
+  - type: web
+    name: payguard-frontend
+    runtime: docker
+    plan: free
+    rootDir: frontend
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: NEXT_PUBLIC_API_URL
+        sync: false   # set to the deployed backend URL
