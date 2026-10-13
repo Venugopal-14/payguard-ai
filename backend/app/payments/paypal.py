@@ -7,11 +7,14 @@ from environment variables and are never logged.
 from __future__ import annotations
 
 import base64
+import logging
 import uuid
 
 import httpx
 
 from app.core.config import settings
+
+_wh_log = logging.getLogger("payguard.webhooks")
 
 
 class PayPalNotConfigured(RuntimeError):
@@ -142,15 +145,19 @@ async def verify_webhook_signature(*, headers: dict, raw_body: bytes) -> bool:
 
     # Normalize header lookup (case-insensitive).
     lower = {k.lower(): v for k, v in headers.items()}
-    for h in WEBHOOK_SIG_HEADERS:
-        if h not in lower:
-            return False
+    missing = [h for h in WEBHOOK_SIG_HEADERS if h not in lower]
+    if missing:
+        # Log header NAMES only (never values) so we can tell a missing-header
+        # case apart from a genuine signature FAILURE from PayPal.
+        _wh_log.warning("verify_missing_headers headers=%s", ",".join(missing))
+        return False
 
     import json as _json
 
     try:
         event = _json.loads(raw_body.decode("utf-8"))
     except Exception:
+        _wh_log.warning("verify_bad_json_body")
         return False
 
     token = await get_access_token()
@@ -176,4 +183,10 @@ async def verify_webhook_signature(*, headers: dict, raw_body: bytes) -> bool:
             timeout=30,
         )
         resp.raise_for_status()
-        return resp.json().get("verification_status") == "SUCCESS"
+        status = resp.json().get("verification_status")
+        if status != "SUCCESS":
+            # PayPal reachable but says the signature is not valid. The Webhook
+            # Simulator always lands here because its events are not signed
+            # against a real webhook; genuine delivered events verify SUCCESS.
+            _wh_log.warning("verify_status_not_success status=%s", status)
+        return status == "SUCCESS"
