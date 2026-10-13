@@ -44,6 +44,11 @@ services:
         value: gpt-4o-mini
 
   # ---------- Frontend (Next.js) ----------
+  # NEXT_PUBLIC_API_URL is inlined during `next build`. Render automatically
+  # translates service env vars into Docker build ARGs, and the frontend
+  # Dockerfile declares `ARG NEXT_PUBLIC_API_URL` in its build stage, so the
+  # value set in the dashboard is baked into the bundle. Changing it triggers a
+  # rebuild.
   - type: web
     name: payguard-frontend
     runtime: docker
@@ -52,4 +57,4 @@ services:
     dockerfilePath: ./Dockerfile
     envVars:
       - key: NEXT_PUBLIC_API_URL
-        sync: false   # set to the deployed backend URL
+        sync: false   # set to the deployed backend URL (triggers a rebuild)
