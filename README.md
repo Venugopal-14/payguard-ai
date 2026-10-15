@@ -29,6 +29,10 @@ governs exactly what it is allowed to do.
 
 ## Architecture
 
+A full architecture diagram and component breakdown live in
+[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)
+([SVG](./docs/architecture.svg) · [Mermaid source](./docs/architecture.mmd)).
+
 ```
                  USER mission + budget + policy
                               │

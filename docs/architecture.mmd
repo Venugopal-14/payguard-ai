@@ -1,0 +1,59 @@
+%% PayGuard AI — architecture (source of truth: current code).
+%% AI recommends -> PayGuard authorizes -> PayPal executes.
+%% NOTE: In the current deployment the AI provider runs in deterministic
+%% rule-based FALLBACK mode (no LLM key set); the LLM path is implemented.
+flowchart TB
+    User([User / Merchant<br/>natural-language mission + budget])
+
+    subgraph Client["Frontend — Next.js 14"]
+        FE["Control-plane UI<br/>app/lib/api.ts<br/>connection retry + error banner"]
+    end
+
+    subgraph Backend["Backend — FastAPI"]
+        API["Control-plane API<br/>api/payguard.py"]
+        GUARD["Optional API-key guard<br/>core/security.py (opt-in, OFF by default)"]
+        AGENT["AI Agent — PROPOSES ONLY<br/>agent/agent.py<br/>LLM (Ollama/OpenAI) OR rule-based fallback"]
+        RISK["Risk Engine (deterministic)<br/>engine/risk.py<br/>12 factors, score 0-100<br/>LOW / MEDIUM / HIGH / CRITICAL"]
+        POLICY["Policy Engine (authority)<br/>engine/policy.py"]
+        LIFE["Transaction lifecycle / state machine<br/>engine/lifecycle.py"]
+        PP["PayPal integration<br/>payments/paypal.py<br/>OAuth2 + Orders v2"]
+        WH["Webhook handler<br/>api/webhooks.py<br/>signature-verified + idempotent"]
+        ANALYTICS["Fraud analytics (SIMULATED)<br/>engine/analytics.py"]
+        METRICS["Prometheus /metrics<br/>core/metrics.py"]
+    end
+
+    subgraph Data["Persistence — PostgreSQL 17"]
+        DB[("transactions · missions<br/>audit_events · webhook_events")]
+        AUDIT["Immutable audit trail<br/>actors + correlation IDs<br/>secrets sanitized"]
+    end
+
+    PAYPAL{{"PayPal Sandbox<br/>Orders v2 + Webhooks"}}
+
+    User --> FE
+    FE -->|REST /api/*| GUARD
+    GUARD --> API
+    API --> AGENT
+    AGENT -->|proposal| RISK
+    RISK -->|score + level| POLICY
+
+    POLICY -->|APPROVE| APPROVED["status: APPROVED"]
+    POLICY -->|NEEDS_APPROVAL| AWAIT["status: AWAITING_APPROVAL"]
+    POLICY -->|BLOCK| BLOCKED["status: BLOCKED (terminal)<br/>no PayPal order"]
+
+    AWAIT -->|human approves| APPROVED
+    APPROVED --> LIFE
+    LIFE -->|create order| PP
+    PP -->|order + approve_url| PAYPAL
+    PAYPAL -->|buyer approves| PP
+    PP -->|capture| PAYPAL
+    PAYPAL -->|COMPLETED / FAILED| LIFE
+
+    PAYPAL -.->|signed event| WH
+    WH -->|verify + dedupe + reconcile| LIFE
+
+    API --> DB
+    LIFE --> AUDIT
+    AUDIT --> DB
+    DB --> ANALYTICS
+    ANALYTICS -->|/api/analytics/fraud| FE
+    API --> METRICS
