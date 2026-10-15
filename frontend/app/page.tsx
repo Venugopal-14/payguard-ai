@@ -61,21 +61,64 @@ export default function Home() {
   const [txn, setTxn] = useState<Transaction | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Connection state for the dashboard's data load. null = healthy.
+  const [connErr, setConnErr] = useState<string | null>(null);
 
-  async function refresh() {
+  // Fetch transactions. Returns true on success, false on failure, so callers
+  // can decide whether to retry / surface an error instead of silently showing
+  // misleading zero data.
+  async function refresh(): Promise<boolean> {
     try {
       setHistory(await listTransactions());
+      return true;
     } catch {
-      /* ignore */
+      return false;
     }
   }
 
   useEffect(() => {
-    health()
-      .then((h) => setCfg({ paypal: h.paypal_configured, ai: h.ai_configured, provider: h.ai_provider }))
-      .catch(() => setCfg(null));
-    refresh();
+    let cancelled = false;
+
+    // health is best-effort (drives status dots only); the transaction fetch is
+    // what determines whether we show data or a connection error.
+    async function loadConfig() {
+      try {
+        const h = await health();
+        if (!cancelled) setCfg({ paypal: h.paypal_configured, ai: h.ai_configured, provider: h.ai_provider });
+      } catch {
+        if (!cancelled) setCfg(null);
+      }
+    }
+
+    (async () => {
+      await loadConfig();
+      const ok = await refresh();
+      if (cancelled || ok) return;
+
+      // First load failed (e.g. Render free-tier cold start). Surface a clear
+      // "connecting" message, wait, and retry exactly once.
+      setConnErr("Connecting to backend…");
+      await new Promise((r) => setTimeout(r, 4000));
+      if (cancelled) return;
+      await loadConfig();
+      const retryOk = await refresh();
+      if (cancelled) return;
+      setConnErr(
+        retryOk
+          ? null
+          : "Can't reach the backend. It may be waking up — click Retry in a moment."
+      );
+    })();
+
+    return () => { cancelled = true; };
   }, []);
+
+  // Manual retry from the banner: only clear the error on a confirmed success.
+  async function retryConnection() {
+    setConnErr("Connecting to backend…");
+    const ok = await refresh();
+    setConnErr(ok ? null : "Still can't reach the backend. Please try again shortly.");
+  }
 
   const metrics = useMemo(() => computeMetrics(history), [history]);
   const awaiting = useMemo(
@@ -180,6 +223,18 @@ export default function Home() {
         </header>
 
         <div className="px-8 py-6">
+          {connErr && (
+            <div className="mb-4 flex items-center gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-300">
+              <span aria-hidden>⚠</span>
+              <span>{connErr}</span>
+              <button
+                onClick={retryConnection}
+                className="ml-auto rounded-lg border border-amber-500/40 px-3 py-1 text-xs font-semibold text-amber-200 hover:bg-amber-500/20"
+              >
+                Retry
+              </button>
+            </div>
+          )}
           {view === "Overview" && (
             <OverviewView
               metrics={metrics}
