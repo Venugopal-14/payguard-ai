@@ -25,6 +25,7 @@ from app.agent.agent import propose_purchase
 from app.core import metrics
 from app.db.database import get_db
 from app.engine import lifecycle, policy
+from app.engine.analytics import compute_fraud_analytics
 from app.engine.risk import HistoryRecord, evaluate_risk
 from app.models.audit_event import AuditEvent
 from app.models.mission import Mission
@@ -293,6 +294,16 @@ def get_transaction(transaction_id: int, db: Session = Depends(get_db)):
     if txn is None:
         raise HTTPException(404, "Transaction not found.")
     return TransactionView.model_validate(txn)
+
+
+@router.get("/analytics/fraud")
+def fraud_analytics(db: Session = Depends(get_db)):
+    """Read-only simulated fraud-prevention analytics from persisted data.
+
+    All figures are SIMULATED (clearly labeled). Real completed payments are
+    excluded from blocked/saved amounts.
+    """
+    return compute_fraud_analytics(db)
 
 
 @router.get("/transactions/{transaction_id}/audit", response_model=list[AuditEventView])

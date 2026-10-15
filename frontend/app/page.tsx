@@ -6,8 +6,10 @@ import {
   capture,
   createMission,
   execute,
+  fraudAnalytics,
   health,
   listTransactions,
+  type FraudAnalytics,
   type ProposeResponse,
   type Transaction,
 } from "./lib/api";
@@ -29,6 +31,7 @@ type View =
   | "Missions"
   | "Approval Center"
   | "Transactions"
+  | "Fraud Prevention"
   | "Risk Analytics"
   | "Policy Control"
   | "Audit Trail";
@@ -38,6 +41,7 @@ const NAV: { key: View; icon: string }[] = [
   { key: "Missions", icon: "✦" },
   { key: "Approval Center", icon: "◉" },
   { key: "Transactions", icon: "≣" },
+  { key: "Fraud Prevention", icon: "🛡" },
   { key: "Risk Analytics", icon: "◈" },
   { key: "Policy Control", icon: "⚙" },
   { key: "Audit Trail", icon: "❖" },
@@ -199,6 +203,9 @@ export default function Home() {
           )}
           {view === "Transactions" && (
             <TransactionsView history={history} onOpen={setDetail} />
+          )}
+          {view === "Fraud Prevention" && (
+            <FraudPrevention history={history} onOpen={setDetail} />
           )}
           {view === "Risk Analytics" && <RiskAnalytics history={history} />}
           {view === "Policy Control" && <PolicyControl threshold={threshold} />}
@@ -569,6 +576,192 @@ function AuditTrail({ history, onOpen }: { history: Transaction[]; onOpen: (t: T
         ))}
       </div>
     </Card>
+  );
+}
+
+/* ---------- Fraud Prevention ---------- */
+function FraudPrevention({
+  history,
+  onOpen,
+}: {
+  history: Transaction[];
+  onOpen: (t: Transaction) => void;
+}) {
+  const [data, setData] = useState<FraudAnalytics | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    fraudAnalytics()
+      .then(setData)
+      .catch((e) => setErr(e instanceof Error ? e.message : "Failed to load"));
+  }, []);
+
+  if (err)
+    return (
+      <Card className="p-6">
+        <p className="text-sm text-rose-300">{err}</p>
+      </Card>
+    );
+  if (!data)
+    return (
+      <Card className="p-6">
+        <p className="text-sm text-slate-500">Loading analytics…</p>
+      </Card>
+    );
+
+  const money = (m: Record<string, number>) => {
+    const keys = Object.keys(m);
+    if (keys.length === 0) return "0.00";
+    // Currency-safe: list each currency separately, never summed together.
+    return keys.map((k) => fmtMoney(m[k], k)).join(" · ");
+  };
+
+  const blocked = history.filter((t) => t.status === "BLOCKED");
+
+  return (
+    <div className="space-y-6">
+      {/* Simulated banner */}
+      <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs text-amber-300">
+        All fraud-prevention figures are <strong>simulated</strong> from the
+        risk/policy engine — not real-world money saved. Completed payments are
+        excluded.
+      </div>
+
+      {/* KPI cards */}
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        <Kpi
+          label="Simulated fraud attempts blocked"
+          value={String(data.simulated_fraud_attempts_blocked)}
+          accent="text-rose-300"
+        />
+        <Kpi
+          label="Simulated blocked amount"
+          value={money(data.simulated_blocked_amount_by_currency)}
+          accent="text-rose-300"
+        />
+        <Kpi
+          label="Approval rate"
+          value={
+            data.approval_rate_pct === null
+              ? "—"
+              : `${data.approval_rate_pct}%`
+          }
+          accent="text-emerald-300"
+        />
+        <Kpi
+          label="Pending approvals"
+          value={String(data.pending_approval)}
+          accent="text-amber-300"
+        />
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-2">
+        {/* Risk distribution */}
+        <Card className="p-6">
+          <h3 className="mb-4 font-semibold text-white">Risk distribution</h3>
+          <div className="space-y-3">
+            {(["LOW", "MEDIUM", "HIGH", "CRITICAL"] as const).map((lvl) => {
+              const counts = Object.values(data.risk_distribution);
+              const max = Math.max(1, ...counts);
+              const v = data.risk_distribution[lvl] ?? 0;
+              return (
+                <div key={lvl}>
+                  <div className="mb-1 flex justify-between text-xs">
+                    <span className={RISK_TEXT[lvl]}>{lvl}</span>
+                    <span className="text-slate-500">{v}</span>
+                  </div>
+                  <div className="h-2.5 overflow-hidden rounded-full bg-slate-800">
+                    <div
+                      className="h-full rounded-full"
+                      style={{
+                        width: `${(v / max) * 100}%`,
+                        background:
+                          lvl === "LOW"
+                            ? "#34d399"
+                            : lvl === "MEDIUM"
+                            ? "#fbbf24"
+                            : "#fb7185",
+                      }}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+
+        {/* Decision breakdown + policy blocked */}
+        <Card className="p-6">
+          <h3 className="mb-4 font-semibold text-white">Decision breakdown</h3>
+          <div className="space-y-2 text-sm">
+            <Line label="Approved" value={data.decision_breakdown.APPROVE ?? 0} tone="text-emerald-300" />
+            <Line label="Awaiting approval" value={data.decision_breakdown.NEEDS_APPROVAL ?? 0} tone="text-amber-300" />
+            <Line label="Blocked" value={data.decision_breakdown.BLOCK ?? 0} tone="text-rose-300" />
+          </div>
+          <div className="mt-4 border-t border-slate-800 pt-4 text-sm">
+            <p className="text-xs text-slate-500">
+              Policy-blocked amount (budget/limit — not fraud)
+            </p>
+            <p className="mt-1 text-slate-200">
+              {money(data.policy_blocked_amount_by_currency)}
+            </p>
+          </div>
+        </Card>
+      </div>
+
+      {/* Blocked transactions with reasons */}
+      <Card className="p-6">
+        <h3 className="mb-4 font-semibold text-white">
+          Blocked transactions &amp; reasons
+        </h3>
+        {blocked.length === 0 ? (
+          <p className="text-sm text-slate-500">
+            No blocked transactions yet.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {blocked.map((t) => (
+              <div
+                key={t.id}
+                onClick={() => onOpen(t)}
+                className="cursor-pointer rounded-lg border border-slate-800/60 p-3 hover:bg-slate-800/40"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-slate-200">
+                    #{t.id} {t.description} · {t.merchant}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <Badge
+                      label={t.risk_level}
+                      className={RISK_BADGE[t.risk_level] ?? ""}
+                    />
+                    <span className="text-sm text-slate-400">
+                      {fmtMoney(Number(t.amount), t.currency)}
+                    </span>
+                  </div>
+                </div>
+                <p className="mt-1 text-xs text-slate-500">
+                  {t.reasoning
+                    .split("\n")
+                    .filter((l) => l.startsWith("Policy:"))
+                    .map((l) => l.replace("Policy: ", ""))
+                    .join(" ") || "Blocked by policy."}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function Line({ label, value, tone }: { label: string; value: number; tone: string }) {
+  return (
+    <div className="flex justify-between">
+      <span className="text-slate-400">{label}</span>
+      <span className={`font-semibold ${tone}`}>{value}</span>
+    </div>
   );
 }
 

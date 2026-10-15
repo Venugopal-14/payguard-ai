@@ -1,5 +1,9 @@
+// Treat an empty string the same as unset. Docker/Next can inline an empty
+// NEXT_PUBLIC_API_URL at build time, and `??` would NOT fall back for "",
+// leaving API_URL="" so fetches hit the frontend origin and 404. Trimming to a
+// falsy check guarantees we fall back to the backend URL.
 export const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8100";
+  (process.env.NEXT_PUBLIC_API_URL || "").trim() || "http://localhost:8100";
 
 export type Transaction = {
   id: number;
@@ -113,4 +117,25 @@ export async function health(): Promise<{
 }> {
   const res = await fetch(`${API_URL}/health`, { cache: "no-store" });
   return j(res);
+}
+
+export type FraudAnalytics = {
+  label: string;
+  total_transactions: number;
+  pending_approval: number;
+  decided_transactions: number;
+  approved_transactions: number;
+  approval_rate_pct: number | null;
+  simulated_fraud_attempts_blocked: number;
+  simulated_blocked_amount_by_currency: Record<string, number>;
+  policy_blocked_amount_by_currency: Record<string, number>;
+  risk_distribution: Record<string, number>;
+  decision_breakdown: Record<string, number>;
+};
+
+export async function fraudAnalytics(): Promise<FraudAnalytics> {
+  const res = await fetch(`${API_URL}/api/analytics/fraud`, {
+    cache: "no-store",
+  });
+  return j<FraudAnalytics>(res);
 }
