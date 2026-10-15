@@ -23,6 +23,7 @@ import uuid
 
 from app.agent.agent import propose_purchase
 from app.core import metrics
+from app.core.security import require_api_key
 from app.db.database import get_db
 from app.engine import lifecycle, policy
 from app.engine.analytics import compute_fraud_analytics
@@ -53,7 +54,11 @@ _STATUS_FOR_DECISION = {
 }
 
 
-@router.post("/missions", response_model=ProposeResponse)
+@router.post(
+    "/missions",
+    response_model=ProposeResponse,
+    dependencies=[Depends(require_api_key)],
+)
 async def create_mission(req: MissionRequest, db: Session = Depends(get_db)):
     """Agent proposes a purchase for the mission, engines decide its fate."""
     mission = Mission(
@@ -189,7 +194,11 @@ async def create_mission(req: MissionRequest, db: Session = Depends(get_db)):
     )
 
 
-@router.post("/transactions/{transaction_id}/approve", response_model=TransactionView)
+@router.post(
+    "/transactions/{transaction_id}/approve",
+    response_model=TransactionView,
+    dependencies=[Depends(require_api_key)],
+)
 def approve_transaction(transaction_id: int, db: Session = Depends(get_db)):
     """Human approves a transaction that was AWAITING_APPROVAL."""
     txn = db.get(Transaction, transaction_id)
@@ -207,7 +216,11 @@ def approve_transaction(transaction_id: int, db: Session = Depends(get_db)):
     return TransactionView.model_validate(txn)
 
 
-@router.post("/transactions/execute", response_model=TransactionView)
+@router.post(
+    "/transactions/execute",
+    response_model=TransactionView,
+    dependencies=[Depends(require_api_key)],
+)
 async def execute_transaction(req: ExecuteRequest, db: Session = Depends(get_db)):
     """Create the PayPal order for an APPROVED transaction."""
     txn = db.get(Transaction, req.transaction_id)
@@ -246,7 +259,11 @@ async def execute_transaction(req: ExecuteRequest, db: Session = Depends(get_db)
     return TransactionView.model_validate(txn)
 
 
-@router.post("/transactions/capture", response_model=TransactionView)
+@router.post(
+    "/transactions/capture",
+    response_model=TransactionView,
+    dependencies=[Depends(require_api_key)],
+)
 async def capture_transaction(req: CaptureRequest, db: Session = Depends(get_db)):
     """Capture funds after the sandbox buyer approved the order."""
     txn = db.get(Transaction, req.transaction_id)

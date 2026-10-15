@@ -91,6 +91,7 @@ def health():
         "webhook_configured": settings.webhook_configured,
         "ai_configured": settings.ai_configured,
         "ai_provider": settings.ai_provider,
+        "api_key_enforced": settings.api_key_enforced,
     }
 
 

@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     ollama_base_url: str = ""
     ollama_model: str = ""
 
+    # Opt-in API-key guard for state-changing routes. Blank => enforcement OFF
+    # (current demo behavior preserved). Set => X-API-Key required on guarded
+    # routes. Never a NEXT_PUBLIC_* value; never logged.
+    payguard_api_key: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore",
@@ -63,6 +68,11 @@ class Settings(BaseSettings):
     def ai_configured(self) -> bool:
         """True if any real LLM provider is configured (Ollama or OpenAI)."""
         return self.ollama_configured or self.openai_configured
+
+    @property
+    def api_key_enforced(self) -> bool:
+        """True when the opt-in API-key guard is active. Never exposes the key."""
+        return bool(self.payguard_api_key)
 
     @property
     def ai_provider(self) -> str:
