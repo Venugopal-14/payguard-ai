@@ -19,6 +19,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+import logging
 import uuid
 
 from app.agent.agent import propose_purchase
@@ -45,6 +46,8 @@ from app.schemas.payment import (
 )
 
 router = APIRouter(prefix="/api", tags=["payguard"])
+
+logger = logging.getLogger("payguard.api")
 
 
 _STATUS_FOR_DECISION = {
@@ -242,11 +245,14 @@ async def execute_transaction(req: ExecuteRequest, db: Session = Depends(get_db)
         )
     except paypal.PayPalNotConfigured as exc:
         raise HTTPException(503, str(exc))
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         metrics.paypal_orders_total.labels("error").inc()
         lifecycle.transition(db, txn, target="FAILED", actor=lifecycle.PAYPAL,
                              event_type="ORDER_FAILED", reason="PayPal order creation failed.")
-        raise HTTPException(502, f"PayPal order creation failed: {exc}")
+        # Log full detail server-side (with txn id); return a generic message so
+        # internal/PayPal exception text never reaches the client.
+        logger.warning("paypal_order_failed txn_id=%s", txn.id, exc_info=True)
+        raise HTTPException(502, "PayPal order creation failed.")
 
     metrics.paypal_orders_total.labels("success").inc()
     txn.paypal_order_id = order.get("id")
@@ -276,11 +282,14 @@ async def capture_transaction(req: CaptureRequest, db: Session = Depends(get_db)
 
     try:
         result = await paypal.capture_order(txn.paypal_order_id)
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         metrics.paypal_captures_total.labels("error").inc()
         lifecycle.transition(db, txn, target="FAILED", actor=lifecycle.PAYPAL,
                              event_type="CAPTURE_FAILED", reason="PayPal capture failed.")
-        raise HTTPException(502, f"PayPal capture failed: {exc}")
+        # Log full detail server-side (with txn id); return a generic message so
+        # internal/PayPal exception text never reaches the client.
+        logger.warning("paypal_capture_failed txn_id=%s", txn.id, exc_info=True)
+        raise HTTPException(502, "PayPal capture failed.")
 
     txn.paypal_capture_id = paypal.extract_capture_id(result)
     _target = "COMPLETED" if result.get("status") == "COMPLETED" else "FAILED"
