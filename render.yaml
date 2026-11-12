@@ -4,12 +4,10 @@
 # Secrets (sync: false) must be filled in via the Render dashboard, never here.
 # Ollama is NOT available on Render; set OPENAI_API_KEY for a real AI provider,
 # otherwise the app runs the deterministic rule-based fallback agent.
-
-databases:
-  - name: payguard-db
-    databaseName: payguard
-    user: payguard
-    plan: free
+#
+# Database: the Render Postgres instance is managed outside this Blueprint.
+# Set the backend DATABASE_URL to that database's Internal Database URL in the
+# Render dashboard (backend -> Environment). It is never stored in this file.
 
 services:
   # ---------- Backend (FastAPI) ----------
@@ -22,9 +20,7 @@ services:
     healthCheckPath: /health
     envVars:
       - key: DATABASE_URL
-        fromDatabase:
-          name: payguard-db
-          property: connectionString
+        sync: false   # Internal Database URL of the Render Postgres, set in dashboard
       - key: PAYPAL_BASE_URL
         value: https://api-m.sandbox.paypal.com
       - key: PAYPAL_CLIENT_ID
