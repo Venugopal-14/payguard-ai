@@ -106,3 +106,42 @@ reconciliation, audit events, and HTTP latency.
 4. Webhooks are signature-verified before processing; secrets are never logged.
 
 Backed by an automated test suite (adversarial guardrail tests included).
+
+---
+
+## Multi-Agent Mission Orchestrator (`backend/app/orchestrator`)
+
+A dry-run workflow where five specialist agents hand a purchase mission along:
+**Planner → Merchant → Risk → Policy → Supervisor**. The Risk and Policy agents
+call the existing risk and policy engines (nothing is duplicated), and the
+Merchant agent reuses the existing proposal agent. The UI shows each agent's
+status, summary, input/output, and handoff as an activity timeline.
+
+The orchestrator never stores a transaction and never touches PayPal. Its
+result reports three separate things: the **policy recommendation**, the
+**payment execution status** (always `NOT_EXECUTED`), and whether **human
+authorization** is required. "Send to Approval Center" hands the mission to the
+existing control-plane flow with an approval threshold of 0, so every
+non-blocked mission waits in the Approval Center for a person to approve it.
+
+## Known Limitations
+
+- **`/api/orchestrate` is unauthenticated.** It is read-only (it stores nothing
+  and never calls PayPal), so it is not covered by the opt-in API-key guard.
+  If an LLM key were ever configured, anyone able to reach the endpoint could
+  trigger LLM calls through it. Production has no LLM key today.
+- **The five orchestrator agents are deterministic, rule-based code.** They are
+  not independent autonomous LLM agents. The only step that can use an LLM is
+  the Merchant agent's call to the existing proposal agent, and the result
+  states which one actually ran.
+- **Production AI runs in deterministic fallback mode** because no LLM provider
+  is configured on the deployment. The LLM path is implemented and was
+  exercised locally with Ollama.
+- **Merchant checks use PayGuard's internal known/blocked lists only.** No
+  external merchant verification is performed.
+- **The Approval Center handoff re-runs the proposal step.** With the fallback
+  agent the result is identical to the dry run; with a live LLM it could differ.
+- **Sandbox only.** PayPal integration targets the PayPal Sandbox, and the fraud
+  analytics are simulated.
+- **The API-key guard is opt-in and disabled by default**, so state-changing
+  routes are public in the current demo deployment.

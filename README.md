@@ -113,6 +113,30 @@ A full architecture diagram and component breakdown live in
 
 ---
 
+## Multi-Agent Mission Orchestrator
+
+Open **Mission Orchestrator** in the dashboard, enter a purchase mission, and
+watch five specialist agents hand it along as an activity timeline:
+
+1. **Planner** extracts the budget and constraints from the mission.
+2. **Merchant** proposes a purchase and classifies the merchant against
+   PayGuard's internal known/blocked lists.
+3. **Risk** scores it with the existing 12-factor risk engine.
+4. **Policy** applies the existing policy engine (approve / needs approval / block).
+5. **Supervisor** summarises the result and hands off to a human.
+
+The result keeps three things separate: the policy recommendation, the payment
+execution status (always **NOT EXECUTED** here), and whether human authorization
+is required. **Send to Approval Center** creates a pending transaction that waits
+for a person to approve it; no PayPal order exists until they approve and execute.
+
+> The five agents are deterministic and rule-based, not independent LLM agents,
+> and the deployed app runs the deterministic fallback proposal agent. The
+> endpoint is read-only but unauthenticated. See
+> [Known Limitations](./docs/ARCHITECTURE.md#known-limitations).
+
+---
+
 ## Security model
 
 See [SECURITY.md](./SECURITY.md). In short:
