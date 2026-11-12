@@ -36,6 +36,32 @@ export const DECISION_BADGE: Record<string, string> = {
   BLOCK: "bg-rose-500/10 text-rose-400 border-rose-500/30",
 };
 
+export const DECISION_TEXT: Record<string, string> = {
+  APPROVE: "text-emerald-400",
+  NEEDS_APPROVAL: "text-amber-400",
+  BLOCK: "text-rose-400",
+};
+
+/**
+ * Display label for a lifecycle status. The stored/API value stays
+ * AWAITING_APPROVAL; it is shown to people as "Pending approval".
+ */
+export const STATUS_LABEL: Record<string, string> = {
+  AWAITING_APPROVAL: "PENDING APPROVAL",
+};
+
+export function statusLabel(status: string): string {
+  return STATUS_LABEL[status] ?? status.replace(/_/g, " ");
+}
+
+/**
+ * Display label for the policy recommendation (Transaction.decision). This is
+ * never a human approval; it is prefixed so it can't be read as a status.
+ */
+export function recommendationLabel(decision: string): string {
+  return `Policy: ${decision.replace(/_/g, " ")}`;
+}
+
 export function fmtMoney(amount: number, currency = "USD"): string {
   try {
     return new Intl.NumberFormat("en-US", {
@@ -88,6 +114,8 @@ export type Metrics = {
 
 export function computeMetrics(history: Transaction[]): Metrics {
   const total = history.length;
+  // "approved" = human-approved (APPROVED and later). Since every non-blocked
+  // mission starts as AWAITING_APPROVAL, a policy APPROVE alone never counts.
   const approved = history.filter((t) =>
     ["APPROVED", "PAYPAL_CREATED", "COMPLETED"].includes(t.status)
   ).length;

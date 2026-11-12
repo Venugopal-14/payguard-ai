@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import logging
 import uuid
+from urllib.parse import urlparse
 
 import httpx
 
@@ -16,12 +17,76 @@ from app.core.config import settings
 
 _wh_log = logging.getLogger("payguard.webhooks")
 
+# PayGuard is Sandbox-only. Every PayPal call goes through get_access_token(),
+# which refuses any other API base URL, so live credentials/endpoints can never
+# be used even if misconfigured.
+SANDBOX_API_BASE = "https://api-m.sandbox.paypal.com"
+
 
 class PayPalNotConfigured(RuntimeError):
     pass
 
 
+class PayPalNotSandbox(RuntimeError):
+    """Raised when PAYPAL_BASE_URL is not the PayPal Sandbox API."""
+
+
+class PayPalAPIError(RuntimeError):
+    """A non-2xx PayPal response, reduced to safe, non-secret fields.
+
+    `issue` is PayPal's machine-readable reason (e.g. ORDER_NOT_APPROVED,
+    INSTRUMENT_DECLINED, ORDER_ALREADY_CAPTURED). Never contains credentials.
+    """
+
+    def __init__(self, status_code: int, issue: str | None, debug_id: str | None):
+        self.status_code = status_code
+        self.issue = issue
+        self.debug_id = debug_id
+        super().__init__(f"PayPal HTTP {status_code} issue={issue} debug_id={debug_id}")
+
+    @property
+    def retryable(self) -> bool:
+        """5xx/429 => outcome unknown or transient; safe to retry later."""
+        return self.status_code >= 500 or self.status_code == 429
+
+
+def _raise_for(resp: httpx.Response) -> None:
+    if resp.is_success:
+        return
+    issue = debug_id = None
+    try:
+        body = resp.json()
+        debug_id = body.get("debug_id")
+        details = body.get("details") or []
+        issue = (details[0].get("issue") if details else None) or body.get("name")
+    except Exception:  # noqa: BLE001 - non-JSON error body
+        pass
+    raise PayPalAPIError(resp.status_code, issue, debug_id)
+
+
+def require_sandbox() -> None:
+    if settings.paypal_base_url.rstrip("/") != SANDBOX_API_BASE:
+        raise PayPalNotSandbox(
+            "PAYPAL_BASE_URL must be the PayPal Sandbox API; live PayPal is not supported."
+        )
+
+
+def is_sandbox_approve_url(url: str | None) -> bool:
+    """True only for an https PayPal *Sandbox* checkout URL."""
+    if not url:
+        return False
+    try:
+        p = urlparse(url)
+    except ValueError:
+        return False
+    host = (p.hostname or "").lower()
+    return p.scheme == "https" and (
+        host == "sandbox.paypal.com" or host.endswith(".sandbox.paypal.com")
+    )
+
+
 async def get_access_token() -> str:
+    require_sandbox()
     if not settings.paypal_configured:
         raise PayPalNotConfigured(
             "PAYPAL_CLIENT_ID / PAYPAL_CLIENT_SECRET are not set in .env"
@@ -48,7 +113,8 @@ async def get_access_token() -> str:
 
 
 async def create_order(
-    *, amount: float, currency: str = "USD", description: str = ""
+    *, amount: float, currency: str = "USD", description: str = "",
+    request_id: str | None = None,
 ) -> dict:
     token = await get_access_token()
 
@@ -56,8 +122,9 @@ async def create_order(
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         # Idempotency key: PayPal dedupes retried create-order requests that
-        # carry the same PayPal-Request-Id, preventing duplicate orders.
-        "PayPal-Request-Id": str(uuid.uuid4()),
+        # carry the same PayPal-Request-Id, preventing duplicate orders. Callers
+        # pass a stable per-transaction id so retries/double-clicks reuse it.
+        "PayPal-Request-Id": request_id or str(uuid.uuid4()),
     }
 
     unit: dict = {
@@ -87,26 +154,50 @@ async def create_order(
             json=payload,
             timeout=30,
         )
-        resp.raise_for_status()
+        _raise_for(resp)
         return resp.json()
 
 
-async def capture_order(order_id: str) -> dict:
+def _safe_order_id(order_id: str) -> str:
+    # PayPal order ids are alphanumeric; refuse anything that could alter the URL.
+    if not order_id or not order_id.isalnum() or len(order_id) > 64:
+        raise ValueError("Invalid PayPal order id.")
+    return order_id
+
+
+async def capture_order(order_id: str, request_id: str | None = None) -> dict:
     token = await get_access_token()
 
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
+        # Same id on retry => PayPal returns the original capture result
+        # instead of attempting a second capture.
+        "PayPal-Request-Id": request_id or str(uuid.uuid4()),
     }
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(
-            f"{settings.paypal_base_url}/v2/checkout/orders/{order_id}/capture",
+            f"{settings.paypal_base_url}/v2/checkout/orders/"
+            f"{_safe_order_id(order_id)}/capture",
             headers=headers,
             json={},
             timeout=30,
         )
-        resp.raise_for_status()
+        _raise_for(resp)
+        return resp.json()
+
+
+async def get_order(order_id: str) -> dict:
+    """Read-only order lookup (used to confirm state after an ambiguous result)."""
+    token = await get_access_token()
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{settings.paypal_base_url}/v2/checkout/orders/{_safe_order_id(order_id)}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=30,
+        )
+        _raise_for(resp)
         return resp.json()
 
 
@@ -120,6 +211,14 @@ def extract_approve_url(order: dict) -> str | None:
 def extract_capture_id(capture_response: dict) -> str | None:
     try:
         return capture_response["purchase_units"][0]["payments"]["captures"][0]["id"]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def extract_capture(order_or_capture_response: dict) -> dict | None:
+    """First capture object (id, status, amount) from an order/capture response."""
+    try:
+        return order_or_capture_response["purchase_units"][0]["payments"]["captures"][0]
     except (KeyError, IndexError, TypeError):
         return None
 

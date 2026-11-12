@@ -9,6 +9,7 @@ import {
   type Transaction,
 } from "../lib/api";
 import { Badge, Card } from "./primitives";
+import { statusLabel } from "../lib/ui";
 
 const STEP_BADGE: Record<string, string> = {
   ok: "bg-emerald-500/10 text-emerald-400 border-emerald-500/30",
@@ -79,18 +80,22 @@ export function OrchestratorView({
     }
   }
 
-  // Hands the mission to the EXISTING control-plane flow. The handoff always
-  // uses an approval threshold of 0, so any non-blocked result lands in the
-  // Approval Center as AWAITING_APPROVAL. Without this, a policy APPROVE would
-  // skip the Approval Center. A blocked mission is still blocked by the engine.
-  // No PayPal order is created until a human approves AND clicks execute.
+  // Hands the mission to the EXISTING control-plane flow, using the SAME budget
+  // and approval threshold the dry run evaluated, so the stored policy
+  // recommendation matches what the Supervisor showed. The backend always
+  // creates non-blocked transactions as AWAITING_APPROVAL (Pending approval),
+  // so a human must approve before any PayPal order can be created.
   async function submitForApproval() {
     if (!result) return;
     const constraints = result.steps[0]?.output?.constraints as
-      | { max_budget?: number }
+      | { max_budget?: number; approval_threshold?: number }
       | undefined;
     const maxBudget = constraints?.max_budget;
     if (!maxBudget) return;
+    const usedThreshold =
+      typeof constraints?.approval_threshold === "number"
+        ? constraints.approval_threshold
+        : thresholdNum;
     setBusy(true);
     setError(null);
     try {
@@ -98,7 +103,7 @@ export function OrchestratorView({
         instruction,
         budget: maxBudget,
         currency: "USD",
-        approval_threshold: 0,
+        approval_threshold: usedThreshold,
       });
       setCreated(r.transaction);
       onCreated();
@@ -207,7 +212,9 @@ export function OrchestratorView({
             </div>
             <p className="text-sm text-slate-300">{result.explanation}</p>
             <p className="mt-2 text-xs text-slate-500">
-              The policy result is a recommendation, not payment authorization.
+              The policy result is a recommendation, not payment authorization. These badges
+              describe this dry run only; once a transaction is created, its live status is shown
+              in the Approval Center and Transactions.
             </p>
             <p className="mt-2 text-xs text-slate-500">{result.mode_label}</p>
 
@@ -229,7 +236,8 @@ export function OrchestratorView({
             {created && (
               <div className="mt-4 rounded-lg border border-slate-700 bg-slate-950/60 p-3 text-sm text-slate-300">
                 Created transaction #{created.id} with status{" "}
-                <span className="font-semibold text-white">{created.status.replace(/_/g, " ")}</span>.
+                <span className="font-semibold text-white">{statusLabel(created.status)}</span>{" "}
+                (policy recommendation {created.decision.replace(/_/g, " ")}).
                 No PayPal order exists yet; a human must approve and execute it.{" "}
                 <button onClick={goApproval} className="font-semibold text-emerald-400 underline">
                   Open Approval Center

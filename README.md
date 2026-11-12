@@ -5,10 +5,11 @@
 PayGuard AI is a secure **payment control plane for AI agents**. An AI agent
 understands a natural-language financial mission and *proposes* a purchase — but
 it can **never move money on its own**. Every proposal passes through a
-deterministic **risk engine** and **policy engine** that decide whether it is
-auto-approved, needs human approval, or is blocked. Only authorized
-transactions ever reach **PayPal**, and every step is recorded in an auditable
-trail.
+deterministic **risk engine** and **policy engine** that recommend approve,
+needs-approval, or block. Blocked proposals stop there; **every other
+proposal waits for an explicit human approval** — the policy recommendation
+never authorizes a payment by itself. Only human-approved transactions ever
+reach **PayPal**, and every step is recorded in an auditable trail.
 
 Built for the **Build What's Next with PayPal and AI** hackathon.
 
@@ -54,10 +55,13 @@ A full architecture diagram and component breakdown live in
                      └────────┬────────┘
              ┌────────────────┼─────────────────┐
              ▼                ▼                 ▼
-           BLOCK       NEEDS_APPROVAL         APPROVE
+           BLOCK       NEEDS_APPROVAL         APPROVE     (recommendation)
                               │                 │
-                        human approves          │
                               └────────┬────────┘
+                                       ▼
+                          PENDING APPROVAL (AWAITING_APPROVAL)
+                                       │
+                               human approves → APPROVED
                                        ▼
                               ┌─────────────────┐
                               │  PAYPAL SANDBOX │  OAuth2 → Orders v2
@@ -90,12 +94,22 @@ A full architecture diagram and component breakdown live in
   currency anomaly, …) → a 0–100 score and LOW/MEDIUM/HIGH/CRITICAL level with
   human-readable reasons.
 - **Policy engine** — budget limits, approval thresholds, and risk rules produce
-  an auditable `APPROVE` / `NEEDS_APPROVAL` / `BLOCK` decision. **The AI cannot
-  override it.**
-- **Human-in-the-loop** — anything above the threshold or at medium risk waits
-  for explicit human approval.
-- **PayPal Sandbox lifecycle** — real OAuth2 + Orders v2: create → buyer
-  approval → capture, with `PayPal-Request-Id` idempotency.
+  an auditable `APPROVE` / `NEEDS_APPROVAL` / `BLOCK` **recommendation**. **The
+  AI cannot override it.** `BLOCK` is final; the other two never authorize a
+  payment on their own.
+- **Human-in-the-loop** — every non-blocked transaction starts as **Pending
+  approval** (`AWAITING_APPROVAL`) and becomes `APPROVED` only after explicit
+  human approval. The recommendation (`decision`) and the lifecycle `status`
+  are stored separately, and the API also returns a derived `human_approval`
+  field (`PENDING` / `APPROVED` / `NOT_APPLICABLE`). `COMPLETED` is set only
+  after PayPal reports the capture as completed (capture API or verified
+  webhook).
+- **PayPal Sandbox checkout** — real OAuth2 + Orders v2: create → redirect to
+  PayPal's hosted Sandbox checkout → buyer approval → return → capture,
+  verified against PayPal's response (order id, capture status, amount,
+  currency) before `COMPLETED`. Stable per-transaction `PayPal-Request-Id`s
+  plus per-transaction locking make duplicate clicks/returns safe. Sandbox-only
+  by code, not just configuration.
 - **Verified webhooks** — signature-verified via PayPal's verification API,
   idempotent (deduped by event id), reconciling transactions through an audited
   state machine.
@@ -203,12 +217,37 @@ docker compose up --build
 
 ### 3. Try the flow
 1. Open http://localhost:3100 and give the agent a mission + budget.
-2. See the agent proposal, risk gauge, and policy decision.
-3. If approval is required, approve as a human.
-4. **Create PayPal order**, open the approval link, sign in with your **Sandbox
-   personal (buyer)** account, then **Capture**.
-5. The transaction appears in the audit trail as `COMPLETED`.
-6. Explore **Fraud Prevention** and **Risk Analytics** for the simulated
+2. See the agent proposal, risk gauge, and policy recommendation. The
+   transaction is created as **Pending approval** (unless blocked).
+3. Approve it as a human (Missions page or Approval Center).
+4. Click **Pay with PayPal (Sandbox)** (Missions page, or open the transaction
+   from **Transactions**). PayGuard creates a PayPal **Sandbox** order and
+   redirects this tab to PayPal's hosted Sandbox checkout.
+5. Sign in with your **Sandbox personal (buyer)** account and approve the test
+   payment. PayPal redirects back to `/paypal/return`, where PayGuard captures
+   the order and **verifies PayPal's actual response** (order id, capture
+   status, amount and currency) before marking it `COMPLETED`.
+6. The audit trail shows `HUMAN_APPROVED` → `ORDER_CREATED` →
+   `PAYPAL_BUYER_RETURNED` → `CAPTURE_VERIFIED`, with the PayPal order and
+   capture ids.
+
+### PayPal checkout states
+
+| Situation | Result |
+| --- | --- |
+| Capture confirmed `COMPLETED`, amount/currency match | `COMPLETED` |
+| Buyer cancels at PayPal | stays `PAYPAL_CREATED`; **Retry checkout** link |
+| Capture `PENDING` at PayPal | stays `PAYPAL_CREATED`; the verified `PAYMENT.CAPTURE.COMPLETED` webhook completes it |
+| `ORDER_NOT_APPROVED` / `INSTRUMENT_DECLINED` | stays `PAYPAL_CREATED`; buyer can return to PayPal |
+| Network error / PayPal 5xx | unchanged; safe to retry (stable `PayPal-Request-Id`) |
+| Capture `DECLINED`, amount/order mismatch, other PayPal rejection | `FAILED` |
+| Duplicate execute / return / capture | same order reused; never captured twice |
+
+PayGuard is **Sandbox-only**: the backend refuses any `PAYPAL_BASE_URL` other
+than `https://api-m.sandbox.paypal.com`, and both backend and frontend only
+accept checkout links on `*.sandbox.paypal.com`. `FRONTEND_URL` must be the
+frontend's public URL, because PayPal's return/cancel redirects use it.
+7. Explore **Fraud Prevention** and **Risk Analytics** for the simulated
    security analytics.
 
 > **Try the guardrail:** a mission like *"Buy a gift card from unknownvendor"*

@@ -29,6 +29,17 @@ SUPPORTED_EVENTS = {
 }
 
 
+def _amount_matches(txn: Transaction, amount: dict) -> bool:
+    from decimal import Decimal, InvalidOperation
+
+    try:
+        got = Decimal(str(amount.get("value"))).quantize(Decimal("0.01"))
+        want = Decimal(str(txn.amount)).quantize(Decimal("0.01"))
+    except (InvalidOperation, TypeError, AttributeError):
+        return False
+    return got == want and str(amount.get("currency_code", "")).upper() == txn.currency.upper()
+
+
 def _resource_order_id(resource: dict) -> str | None:
     """Best-effort extraction of the PayPal order id from a webhook resource."""
     # Capture resources carry the order id in supplementary_data.related_ids.
@@ -157,6 +168,18 @@ def _apply(db: Session, txn: Transaction, event_type: str, resource: dict) -> st
         return f"capture pending; txn #{txn.id}"
 
     if event_type == "PAYMENT.CAPTURE.COMPLETED":
+        # Never mark COMPLETED for a capture whose amount/currency differs from
+        # the transaction (PayPal capture resources carry `amount`).
+        amount = resource.get("amount")
+        if amount is not None and not _amount_matches(txn, amount):
+            lifecycle.record_event(
+                db, transaction_id=txn.id, correlation_id=txn.correlation_id,
+                event_type="WEBHOOK_AMOUNT_MISMATCH", actor=lifecycle.RECONCILER,
+                reason="Capture webhook amount/currency does not match the "
+                       "transaction; not reconciled.",
+                metadata={"capture_id": resource.get("id")},
+            )
+            return f"txn #{txn.id} amount mismatch; skipped"
         if resource.get("id"):
             txn.paypal_capture_id = resource["id"]
             db.commit()

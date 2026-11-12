@@ -9,8 +9,12 @@ import {
   fmtMoney,
   fmtTime,
   parseReasoning,
+  recommendationLabel,
+  statusLabel,
 } from "../lib/ui";
 import { Badge, RiskGauge } from "./primitives";
+import { PayButton } from "./PayButton";
+import { canStartPayPalCheckout } from "../lib/payAction";
 
 const TABS = ["Overview", "Risk", "Policy", "AI Analysis", "Audit"] as const;
 type Tab = (typeof TABS)[number];
@@ -18,9 +22,16 @@ type Tab = (typeof TABS)[number];
 export function TransactionDrawer({
   txn,
   onClose,
+  onPay,
+  busy = false,
+  error = null,
 }: {
   txn: Transaction;
   onClose: () => void;
+  /** Create/reuse the PayPal Sandbox order and redirect to checkout. */
+  onPay?: (t: Transaction) => void;
+  busy?: boolean;
+  error?: string | null;
 }) {
   const [tab, setTab] = useState<Tab>("Overview");
   const parsed = parseReasoning(txn.reasoning);
@@ -52,11 +63,11 @@ export function TransactionDrawer({
           </div>
           <div className="flex flex-wrap gap-2">
             <Badge
-              label={txn.status}
+              label={statusLabel(txn.status)}
               className={STATUS_BADGE[txn.status] ?? "border-slate-700 text-slate-300"}
             />
             <Badge
-              label={txn.decision}
+              label={recommendationLabel(txn.decision)}
               className={DECISION_BADGE[txn.decision] ?? "border-slate-700 text-slate-300"}
             />
             <Badge
@@ -64,6 +75,16 @@ export function TransactionDrawer({
               className={RISK_BADGE[txn.risk_level] ?? "border-slate-700 text-slate-300"}
             />
           </div>
+          {onPay && canStartPayPalCheckout(txn.status) && (
+            <div className="mt-4">
+              <PayButton txn={txn} onPay={onPay} busy={busy} />
+              <p className="mt-2 text-xs text-slate-500">
+                Human approval is done. You will be redirected to PayPal&apos;s Sandbox
+                checkout to approve the test payment as a Sandbox buyer.
+              </p>
+              {error && <p className="mt-2 text-xs text-rose-400">{error}</p>}
+            </div>
+          )}
         </div>
 
         {/* Tabs */}
@@ -91,7 +112,8 @@ export function TransactionDrawer({
               <Row label="Merchant" value={txn.merchant} />
               <Row label="Amount" value={fmtMoney(Number(txn.amount), txn.currency)} />
               <Row label="Currency" value={txn.currency} />
-              <Row label="Status" value={txn.status} />
+              <Row label="Status" value={statusLabel(txn.status)} />
+              <Row label="Policy recommendation" value={txn.decision.replace(/_/g, " ")} />
               <Row label="Created" value={fmtTime(txn.created_at)} />
               <Row label="PayPal order" value={txn.paypal_order_id ?? "—"} mono />
               <Row label="PayPal capture" value={txn.paypal_capture_id ?? "—"} mono />
@@ -125,11 +147,19 @@ export function TransactionDrawer({
           {tab === "Policy" && (
             <div>
               <p className="mb-3">
-                <span className="text-xs text-slate-500">Final decision: </span>
+                <span className="text-xs text-slate-500">Policy recommendation: </span>
                 <Badge
                   label={txn.decision}
                   className={DECISION_BADGE[txn.decision] ?? "border-slate-700 text-slate-300"}
                 />
+                <span className="ml-3 text-xs text-slate-500">Status: </span>
+                <Badge
+                  label={statusLabel(txn.status)}
+                  className={STATUS_BADGE[txn.status] ?? "border-slate-700 text-slate-300"}
+                />
+              </p>
+              <p className="mb-3 text-xs text-slate-500">
+                The recommendation never authorizes payment; a human must approve.
               </p>
               <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
                 Policy checks
@@ -200,9 +230,9 @@ function Row({ label, value, mono }: { label: string; value: string; mono?: bool
 function buildTimeline(txn: Transaction): string[] {
   const ev = ["Mission received", "AI proposal generated", "Risk evaluated", "Policy evaluated"];
   if (txn.decision === "BLOCK") ev.push("Blocked by policy");
-  if (txn.status === "AWAITING_APPROVAL") ev.push("Human approval requested");
+  if (txn.status === "AWAITING_APPROVAL") ev.push("Pending human approval");
   if (["APPROVED", "PAYPAL_CREATED", "COMPLETED"].includes(txn.status))
-    ev.push("Approved");
+    ev.push("Approved by a human");
   if (["PAYPAL_CREATED", "COMPLETED"].includes(txn.status))
     ev.push("PayPal order created");
   if (txn.status === "COMPLETED") ev.push("Payment captured", "Transaction completed");

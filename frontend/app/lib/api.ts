@@ -12,15 +12,16 @@ export type Transaction = {
   merchant: string;
   amount: number;
   currency: string;
-  decision: string;
+  decision: string; // policy RECOMMENDATION: APPROVE | NEEDS_APPROVAL | BLOCK
   risk_score: number;
   risk_level: string;
   reasoning: string;
-  status: string;
+  status: string; // lifecycle: AWAITING_APPROVAL (shown "Pending approval") | APPROVED | ...
   paypal_order_id: string | null;
   paypal_capture_id: string | null;
   approve_url: string | null;
   created_at: string;
+  human_approval?: "PENDING" | "APPROVED" | "NOT_APPLICABLE"; // derived, read-only
 };
 
 export type AgentView = {
@@ -58,9 +59,76 @@ export type ProposeResponse = {
 async function j<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(text || `Request failed (${res.status})`);
+    // FastAPI errors look like {"detail": "..."}; show just the message.
+    let msg = text;
+    try {
+      const d = JSON.parse(text)?.detail;
+      if (typeof d === "string") msg = d;
+    } catch {
+      /* not JSON */
+    }
+    throw new Error(msg || `Request failed (${res.status})`);
   }
   return res.json() as Promise<T>;
+}
+
+/** Outcome of a verified PayPal capture / checkout return (see backend). */
+export type CheckoutResult = {
+  outcome:
+    | "COMPLETED"
+    | "ALREADY_COMPLETED"
+    | "PENDING"
+    | "NOT_APPROVED"
+    | "DECLINED_RETRY"
+    | "RETRYABLE_ERROR"
+    | "FAILED"
+    | "CANCELLED"
+    | "NOT_CAPTURABLE"
+    | "NO_CHANGE";
+  message: string;
+  transaction: Transaction;
+  retry_url: string | null;
+};
+
+/** True only for an https PayPal *Sandbox* checkout URL (never live PayPal). */
+export function isSandboxCheckoutUrl(url: string | null | undefined): url is string {
+  if (!url) return false;
+  try {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase();
+    return (
+      u.protocol === "https:" &&
+      (host === "sandbox.paypal.com" || host.endsWith(".sandbox.paypal.com"))
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Send the browser (same tab) to the PayPal-hosted Sandbox checkout. */
+export function redirectToPayPal(url: string | null | undefined): void {
+  if (!isSandboxCheckoutUrl(url)) {
+    throw new Error("PayPal did not return a valid Sandbox checkout link.");
+  }
+  window.location.assign(url);
+}
+
+export async function paypalReturn(token: string, payerId: string | null): Promise<CheckoutResult> {
+  const res = await fetch(`${API_URL}/api/paypal/return`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token, payer_id: payerId || null }),
+  });
+  return j<CheckoutResult>(res);
+}
+
+export async function paypalCancel(token: string): Promise<CheckoutResult> {
+  const res = await fetch(`${API_URL}/api/paypal/cancel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+  return j<CheckoutResult>(res);
 }
 
 export async function createMission(body: {

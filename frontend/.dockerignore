@@ -1,6 +1,8 @@
 node_modules
 .next
 out
+.test-build
+tests
 .git
 Dockerfile
 .dockerignore

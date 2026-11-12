@@ -6,6 +6,7 @@ import {
   capture,
   createMission,
   execute,
+  redirectToPayPal,
   fraudAnalytics,
   health,
   listTransactions,
@@ -15,6 +16,7 @@ import {
 } from "./lib/api";
 import {
   DECISION_BADGE,
+  DECISION_TEXT,
   RISK_BADGE,
   STATUS_BADGE,
   RISK_TEXT,
@@ -22,9 +24,13 @@ import {
   fmtMoney,
   fmtTime,
   parseReasoning,
+  recommendationLabel,
+  statusLabel,
 } from "./lib/ui";
 import { Badge, Card, RiskGauge, StatusDot } from "./components/primitives";
 import { TransactionDrawer } from "./components/TransactionDrawer";
+import { PayButton } from "./components/PayButton";
+import { canStartPayPalCheckout } from "./lib/payAction";
 import { OrchestratorView } from "./components/OrchestratorView";
 
 type View =
@@ -151,10 +157,25 @@ export default function Home() {
     const t = await run(() => approve(id));
     if (t && txn && t.id === txn.id) setTxn(t);
   }
+  // Human approval must already be done (status APPROVED). This creates the
+  // PayPal Sandbox order (or reuses the existing one) and redirects this tab to
+  // the real PayPal-hosted checkout. PayPal sends the buyer back to /paypal/return.
+  async function payWithPayPal(target: Transaction) {
+    // Defense in depth: the button is only rendered for these statuses, and
+    // the backend also refuses, but never call /execute or redirect otherwise.
+    if (!canStartPayPalCheckout(target.status)) {
+      setError(`Transaction #${target.id} is ${target.status}; PayPal checkout is not available.`);
+      return;
+    }
+    const t = await run(async () => {
+      const r = await execute(target.id);
+      redirectToPayPal(r.approve_url); // same tab, Sandbox host only
+      return r;
+    });
+    if (t && txn && t.id === txn.id) setTxn(t);
+  }
   async function onExecute() {
-    if (!txn) return;
-    const t = await run(() => execute(txn.id));
-    if (t) { setTxn(t); if (t.approve_url) window.open(t.approve_url, "_blank"); }
+    if (txn) await payWithPayPal(txn);
   }
   async function onCapture() {
     if (!txn) return;
@@ -238,11 +259,19 @@ export default function Home() {
               </button>
             </div>
           )}
+          {/* Action errors (e.g. PayPal checkout) for views without their own error slot. */}
+          {error && view !== "Missions" && !detail && (
+            <div role="alert" className="mb-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-4 py-2 text-sm text-rose-300">
+              {error}
+            </div>
+          )}
           {view === "Overview" && (
             <OverviewView
               metrics={metrics}
               history={history}
               onOpen={setDetail}
+              onPay={payWithPayPal}
+              busy={busy}
               goMissions={() => setView("Missions")}
             />
           )}
@@ -263,10 +292,17 @@ export default function Home() {
             />
           )}
           {view === "Approval Center" && (
-            <ApprovalCenter items={awaiting} busy={busy} onApprove={onApprove} onOpen={setDetail} />
+            <ApprovalCenter
+              items={awaiting}
+              ready={history.filter((t) => canStartPayPalCheckout(t.status))}
+              busy={busy}
+              onApprove={onApprove}
+              onOpen={setDetail}
+              onPay={payWithPayPal}
+            />
           )}
           {view === "Transactions" && (
-            <TransactionsView history={history} onOpen={setDetail} />
+            <TransactionsView history={history} onOpen={setDetail} onPay={payWithPayPal} busy={busy} />
           )}
           {view === "Fraud Prevention" && (
             <FraudPrevention history={history} onOpen={setDetail} />
@@ -277,16 +313,26 @@ export default function Home() {
         </div>
       </main>
 
-      {detail && <TransactionDrawer txn={detail} onClose={() => setDetail(null)} />}
+      {detail && (
+        <TransactionDrawer
+          txn={detail}
+          onClose={() => setDetail(null)}
+          busy={busy}
+          error={error}
+          onPay={payWithPayPal}
+        />
+      )}
     </div>
   );
 }
 
 /* ---------- Overview ---------- */
-function OverviewView({ metrics, history, onOpen, goMissions }: {
+function OverviewView({ metrics, history, onOpen, onPay, busy, goMissions }: {
   metrics: ReturnType<typeof computeMetrics>;
   history: Transaction[];
   onOpen: (t: Transaction) => void;
+  onPay: (t: Transaction) => void;
+  busy: boolean;
   goMissions: () => void;
 }) {
   const dist = { LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 0 } as Record<string, number>;
@@ -310,7 +356,7 @@ function OverviewView({ metrics, history, onOpen, goMissions }: {
               + New mission
             </button>
           </div>
-          <TxTable rows={history.slice(0, 6)} onOpen={onOpen} compact />
+          <TxTable rows={history.slice(0, 6)} onOpen={onOpen} onPay={onPay} busy={busy} compact />
         </Card>
 
         <Card className="p-6">
@@ -358,7 +404,8 @@ function MissionsView(props: {
     {
       label: txn?.status === "COMPLETED" ? "Paid" : decision === "BLOCK" ? "Blocked" : "Payment",
       done: txn?.status === "COMPLETED",
-      warn: decision === "NEEDS_APPROVAL" && txn?.status !== "COMPLETED",
+      // Waiting on a human, regardless of the policy recommendation.
+      warn: txn?.status === "AWAITING_APPROVAL",
       block: decision === "BLOCK",
     },
   ];
@@ -446,10 +493,14 @@ function MissionsView(props: {
             {/* policy */}
             <div className="rounded-xl border border-slate-800 bg-slate-950 p-4">
               <div className="mb-2 flex items-center gap-2">
-                <span className="text-xs text-slate-400">Policy decision</span>
+                <span className="text-xs text-slate-400">Policy recommendation</span>
                 {decision && <Badge label={decision} className={DECISION_BADGE[decision] ?? ""} />}
+                {txn && <Badge label={statusLabel(txn.status)} className={STATUS_BADGE[txn.status] ?? "border-slate-700 text-slate-300"} />}
               </div>
-              <p className="text-xs text-slate-500">{result.policy_reasons[0]}</p>
+              <p className="text-xs text-slate-500">{result.policy_reasons[0]?.replace("Auto-approved.", "Meets policy criteria for approval.")}</p>
+              {txn?.status === "AWAITING_APPROVAL" && (
+                <p className="mt-1 text-xs text-amber-300">Pending approval: a human must approve before any PayPal order is created.</p>
+              )}
             </div>
 
             {/* actions */}
@@ -457,14 +508,9 @@ function MissionsView(props: {
               {txn?.status === "AWAITING_APPROVAL" && (
                 <button onClick={props.onApprove} disabled={props.busy} className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-amber-400 disabled:opacity-50">Approve as human</button>
               )}
-              {txn?.status === "APPROVED" && (
-                <button onClick={props.onExecute} disabled={props.busy} className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-50">Create PayPal order</button>
-              )}
+              {txn && <PayButton txn={txn} onPay={() => props.onExecute()} busy={props.busy} />}
               {txn?.status === "PAYPAL_CREATED" && (
-                <>
-                  {txn.approve_url && <a href={txn.approve_url} target="_blank" className="rounded-lg border border-slate-600 px-4 py-2 text-sm font-semibold text-slate-200 hover:border-slate-400">Open PayPal approval ↗</a>}
-                  <button onClick={props.onCapture} disabled={props.busy} className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-50">Capture payment</button>
-                </>
+                <button onClick={props.onCapture} disabled={props.busy} className="rounded-lg border border-slate-600 px-4 py-2 text-sm font-semibold text-slate-200 hover:border-slate-400 disabled:opacity-50" title="Fallback if the automatic capture after returning from PayPal did not complete">Retry capture</button>
               )}
               {txn?.status === "COMPLETED" && <span className="rounded-lg bg-emerald-500/15 px-4 py-2 text-sm font-semibold text-emerald-300">✓ Completed · {txn.paypal_capture_id}</span>}
               {txn?.status === "BLOCKED" && <span className="rounded-lg bg-rose-500/15 px-4 py-2 text-sm font-semibold text-rose-300">Blocked by policy — no PayPal order.</span>}
@@ -477,19 +523,49 @@ function MissionsView(props: {
 }
 
 /* ---------- Approval Center ---------- */
-function ApprovalCenter({ items, busy, onApprove, onOpen }: {
-  items: Transaction[]; busy: boolean; onApprove: (id: number) => void; onOpen: (t: Transaction) => void;
+function ApprovalCenter({ items, ready, busy, onApprove, onOpen, onPay }: {
+  items: Transaction[]; ready: Transaction[]; busy: boolean;
+  onApprove: (id: number) => void; onOpen: (t: Transaction) => void; onPay: (t: Transaction) => void;
 }) {
+  // Human-approved transactions waiting for PayPal checkout (APPROVED /
+  // PAYPAL_CREATED). Approving above moves an item here after refresh.
+  const readySection = ready.length > 0 && (
+    <Card className="p-5">
+      <h3 className="font-semibold text-white">Approved — ready for PayPal checkout</h3>
+      <p className="mb-3 text-xs text-slate-500">
+        Human approval is done. Checkout happens on PayPal&apos;s Sandbox page as a Sandbox buyer.
+      </p>
+      <div className="space-y-2">
+        {ready.map((t) => (
+          <div key={t.id} onClick={() => onOpen(t)}
+            className="flex cursor-pointer items-center justify-between gap-3 rounded-lg border border-slate-800/60 px-4 py-2.5 text-sm hover:bg-slate-800/40">
+            <span className="text-slate-300">
+              #{t.id} {t.description} · {fmtMoney(Number(t.amount), t.currency)}
+            </span>
+            <div className="flex items-center gap-2">
+              <Badge label={statusLabel(t.status)} className={STATUS_BADGE[t.status] ?? "border-slate-700 text-slate-300"} />
+              <PayButton txn={t} onPay={onPay} busy={busy} size="sm" />
+            </div>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+
   if (items.length === 0)
     return (
-      <Card className="p-12 text-center">
-        <p className="text-4xl">✓</p>
-        <p className="mt-3 font-semibold text-white">All clear</p>
-        <p className="mt-1 text-sm text-slate-500">No actions require your attention right now.</p>
-      </Card>
+      <div className="space-y-5">
+        <Card className="p-12 text-center">
+          <p className="text-4xl">✓</p>
+          <p className="mt-3 font-semibold text-white">All clear</p>
+          <p className="mt-1 text-sm text-slate-500">No approvals require your attention right now.</p>
+        </Card>
+        {readySection}
+      </div>
     );
   return (
     <div className="space-y-5">
+      {readySection}
       <p className="text-sm text-slate-400">
         <span className="font-semibold text-amber-400">{items.length}</span> action{items.length > 1 ? "s" : ""} require your attention
       </p>
@@ -511,11 +587,11 @@ function ApprovalCenter({ items, busy, onApprove, onOpen }: {
 
             <div className="grid gap-5 p-5 md:grid-cols-2">
               <div>
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">Why this needs approval</p>
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">Risk signals</p>
                 <ul className="space-y-1">
                   {parsed.risk.length ? parsed.risk.map((s, i) => (
                     <li key={i} className="text-sm text-slate-300">• {s}</li>
-                  )) : <li className="text-sm text-slate-500">Above approval threshold.</li>}
+                  )) : <li className="text-sm text-slate-500">No risk signals recorded.</li>}
                 </ul>
               </div>
               <div>
@@ -525,7 +601,11 @@ function ApprovalCenter({ items, busy, onApprove, onOpen }: {
                     <li key={i} className="text-sm text-slate-300">• {s}</li>
                   )) : <li className="text-sm text-slate-500">Human decision required.</li>}
                 </ul>
-                <p className="mt-3 text-xs text-slate-500">AI recommendation: <span className="font-semibold text-emerald-400">APPROVE</span></p>
+                <p className="mt-3 text-xs text-slate-500">
+                  Policy recommendation:{" "}
+                  <span className={`font-semibold ${DECISION_TEXT[t.decision] ?? "text-slate-300"}`}>{t.decision.replace(/_/g, " ")}</span>
+                  {" "}· Human approval: <span className="font-semibold text-amber-400">PENDING</span>
+                </p>
               </div>
             </div>
 
@@ -544,7 +624,9 @@ function ApprovalCenter({ items, busy, onApprove, onOpen }: {
 }
 
 /* ---------- Transactions ---------- */
-function TransactionsView({ history, onOpen }: { history: Transaction[]; onOpen: (t: Transaction) => void }) {
+function TransactionsView({ history, onOpen, onPay, busy }: {
+  history: Transaction[]; onOpen: (t: Transaction) => void; onPay: (t: Transaction) => void; busy: boolean;
+}) {
   const [q, setQ] = useState("");
   const [status, setStatus] = useState("ALL");
   const [risk, setRisk] = useState("ALL");
@@ -562,7 +644,7 @@ function TransactionsView({ history, onOpen }: { history: Transaction[]; onOpen:
         <Select value={status} onChange={setStatus} options={["ALL", "COMPLETED", "APPROVED", "AWAITING_APPROVAL", "PAYPAL_CREATED", "BLOCKED", "FAILED"]} />
         <Select value={risk} onChange={setRisk} options={["ALL", "LOW", "MEDIUM", "HIGH", "CRITICAL"]} />
       </div>
-      <TxTable rows={rows} onOpen={onOpen} />
+      <TxTable rows={rows} onOpen={onOpen} onPay={onPay} busy={busy} />
     </Card>
   );
 }
@@ -575,9 +657,9 @@ function RiskAnalytics({ history }: { history: Transaction[] }) {
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <Kpi label="Approved" value={String(m.approved)} accent="text-emerald-400" />
+        <Kpi label="Human-approved" value={String(m.approved)} accent="text-emerald-400" />
         <Kpi label="Blocked" value={String(m.blocked)} accent="text-rose-400" />
-        <Kpi label="Awaiting" value={String(m.awaiting)} accent="text-amber-400" />
+        <Kpi label="Pending approval" value={String(m.awaiting)} accent="text-amber-400" />
         <Kpi label="Completed" value={String(m.completed)} accent="text-emerald-400" />
       </div>
       <Card className="p-6">
@@ -614,6 +696,7 @@ function PolicyControl({ threshold }: { threshold: number }) {
         <PolicyRow label="Blocked merchants" value="silkroad, darkmarket, unknownvendor" />
         <PolicyRow label="Blocked categories" value="gambling, weapons, adult" />
         <PolicyRow label="Risk rule" value="MEDIUM → human approval" />
+        <PolicyRow label="Human approval" value="Required for every non-blocked payment" />
       </div>
     </Card>
   );
@@ -633,8 +716,8 @@ function AuditTrail({ history, onOpen }: { history: Transaction[]; onOpen: (t: T
               <span className="text-slate-300">#{t.id} {t.description}</span>
             </div>
             <div className="flex items-center gap-2">
-              <Badge label={t.decision} className={DECISION_BADGE[t.decision] ?? "border-slate-700 text-slate-300"} />
-              <Badge label={t.status} className={STATUS_BADGE[t.status] ?? "border-slate-700 text-slate-300"} />
+              <Badge label={recommendationLabel(t.decision)} className={DECISION_BADGE[t.decision] ?? "border-slate-700 text-slate-300"} />
+              <Badge label={statusLabel(t.status)} className={STATUS_BADGE[t.status] ?? "border-slate-700 text-slate-300"} />
             </div>
           </div>
         ))}
@@ -756,11 +839,12 @@ function FraudPrevention({
 
         {/* Decision breakdown + policy blocked */}
         <Card className="p-6">
-          <h3 className="mb-4 font-semibold text-white">Decision breakdown</h3>
+          <h3 className="mb-1 font-semibold text-white">Policy recommendation breakdown</h3>
+          <p className="mb-4 text-xs text-slate-500">Engine recommendations, not human approvals.</p>
           <div className="space-y-2 text-sm">
-            <Line label="Approved" value={data.decision_breakdown.APPROVE ?? 0} tone="text-emerald-300" />
-            <Line label="Awaiting approval" value={data.decision_breakdown.NEEDS_APPROVAL ?? 0} tone="text-amber-300" />
-            <Line label="Blocked" value={data.decision_breakdown.BLOCK ?? 0} tone="text-rose-300" />
+            <Line label="Policy: approve" value={data.decision_breakdown.APPROVE ?? 0} tone="text-emerald-300" />
+            <Line label="Policy: needs approval" value={data.decision_breakdown.NEEDS_APPROVAL ?? 0} tone="text-amber-300" />
+            <Line label="Policy: block" value={data.decision_breakdown.BLOCK ?? 0} tone="text-rose-300" />
           </div>
           <div className="mt-4 border-t border-slate-800 pt-4 text-sm">
             <p className="text-xs text-slate-500">
@@ -843,7 +927,7 @@ function Select({ value, onChange, options }: { value: string; onChange: (v: str
   return (
     <select value={value} onChange={(e) => onChange(e.target.value)}
       className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-300 outline-none focus:border-emerald-500">
-      {options.map((o) => <option key={o} value={o}>{o.replace(/_/g, " ")}</option>)}
+      {options.map((o) => <option key={o} value={o}>{statusLabel(o)}</option>)}
     </select>
   );
 }
@@ -857,7 +941,10 @@ function PolicyRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-function TxTable({ rows, onOpen, compact }: { rows: Transaction[]; onOpen: (t: Transaction) => void; compact?: boolean }) {
+function TxTable({ rows, onOpen, onPay, busy = false, compact }: {
+  rows: Transaction[]; onOpen: (t: Transaction) => void;
+  onPay?: (t: Transaction) => void; busy?: boolean; compact?: boolean;
+}) {
   if (rows.length === 0) return <p className="text-sm text-slate-500">No transactions.</p>;
   return (
     <div className="overflow-x-auto">
@@ -869,8 +956,9 @@ function TxTable({ rows, onOpen, compact }: { rows: Transaction[]; onOpen: (t: T
             {!compact && <th className="py-2 pr-4">Merchant</th>}
             <th className="py-2 pr-4">Amount</th>
             <th className="py-2 pr-4">Risk</th>
-            <th className="py-2 pr-4">Decision</th>
+            <th className="py-2 pr-4">Policy recommendation</th>
             <th className="py-2 pr-4">Status</th>
+            {onPay && <th className="py-2 pr-4"><span className="sr-only">Action</span></th>}
           </tr>
         </thead>
         <tbody>
@@ -884,8 +972,13 @@ function TxTable({ rows, onOpen, compact }: { rows: Transaction[]; onOpen: (t: T
               <td className={`py-2.5 pr-4 font-medium ${RISK_TEXT[t.risk_level] ?? ""}`}>{t.risk_level}</td>
               <td className="py-2.5 pr-4 text-slate-300">{t.decision.replace(/_/g, " ")}</td>
               <td className="py-2.5 pr-4">
-                <Badge label={t.status} className={STATUS_BADGE[t.status] ?? "border-slate-700 text-slate-300"} />
+                <Badge label={statusLabel(t.status)} className={STATUS_BADGE[t.status] ?? "border-slate-700 text-slate-300"} />
               </td>
+              {onPay && (
+                <td className="py-2.5 pr-4 text-right">
+                  <PayButton txn={t} onPay={onPay} busy={busy} size="sm" />
+                </td>
+              )}
             </tr>
           ))}
         </tbody>

@@ -29,8 +29,10 @@ RECONCILER = "RECONCILER"
 SYSTEM = "SYSTEM"
 
 # Allowed transitions. Keys are source states; values are permitted targets.
+# APPROVED is reachable ONLY from AWAITING_APPROVAL, i.e. via an explicit human
+# approval. A policy recommendation can never move a transaction to APPROVED.
 ALLOWED: dict[str, set[str]] = {
-    "PENDING": {"APPROVED", "AWAITING_APPROVAL", "BLOCKED", "FAILED"},
+    "PENDING": {"AWAITING_APPROVAL", "BLOCKED", "FAILED"},
     "AWAITING_APPROVAL": {"APPROVED", "BLOCKED", "FAILED"},
     "APPROVED": {"PAYPAL_CREATED", "FAILED"},
     "PAYPAL_CREATED": {"COMPLETED", "FAILED"},
@@ -41,8 +43,24 @@ ALLOWED: dict[str, set[str]] = {
 }
 
 # Statuses that create_mission assigns directly (initial states), allowed as a
-# transition from the implicit "new" origin.
-INITIAL_STATES = {"APPROVED", "AWAITING_APPROVAL", "BLOCKED"}
+# transition from the implicit "new" origin. APPROVED is deliberately absent.
+INITIAL_STATES = {"AWAITING_APPROVAL", "BLOCKED"}
+
+
+def human_approval_state(status: str) -> str:
+    """Human-approval view of a lifecycle status (separate from the policy
+    recommendation stored in Transaction.decision).
+
+    PENDING        -> waiting for a human (AWAITING_APPROVAL)
+    APPROVED       -> a human approved it (APPROVED and every later state)
+    NOT_APPLICABLE -> blocked by policy; nothing to approve
+    """
+    if status == "AWAITING_APPROVAL":
+        return "PENDING"
+    if status in ("APPROVED", "PAYPAL_CREATED", "COMPLETED"):
+        return "APPROVED"
+    # BLOCKED, FAILED (terminal) and anything unknown: no approval to give.
+    return "NOT_APPLICABLE"
 
 
 class InvalidTransition(ValueError):

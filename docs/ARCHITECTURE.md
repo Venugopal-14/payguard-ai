@@ -3,9 +3,10 @@
 > **AI recommends → PayGuard authorizes → PayPal executes.**
 
 PayGuard AI treats the AI agent as an *untrusted actor*: it can only **propose** a
-purchase. Deterministic risk and policy engines decide whether that proposal is
-auto-approved, needs human approval, or is blocked. Only authorized transactions
-ever reach PayPal, and every step is recorded in an immutable audit trail.
+purchase. Deterministic risk and policy engines recommend approve,
+needs-approval, or block. Blocked proposals stop; every other proposal waits for
+explicit human approval. Only human-approved transactions ever reach PayPal,
+and every step is recorded in an immutable audit trail.
 
 ![PayGuard AI architecture](./architecture.svg)
 
@@ -59,13 +60,32 @@ LOW / MEDIUM / HIGH / CRITICAL level with human-readable reasons.
 Deterministic decision gate the AI cannot override. In order: non-positive or
 over-budget amounts → **BLOCK**; HIGH/CRITICAL risk → **BLOCK**; amount at/above
 the approval threshold → **NEEDS_APPROVAL**; MEDIUM risk → **NEEDS_APPROVAL**;
-otherwise → **APPROVE**.
+otherwise → **APPROVE**. These are recommendations stored in `decision`; only
+`BLOCK` is enforced directly. `APPROVE` and `NEEDS_APPROVAL` both still require a
+human approval before any PayPal order.
 
 ### Transaction lifecycle / state machine (`backend/app/engine/lifecycle.py`)
 Validates every state change and records an audit event for each. Allowed path:
-`APPROVED → PAYPAL_CREATED → COMPLETED`, with `→ FAILED` branches; `BLOCKED`,
+`AWAITING_APPROVAL (Pending approval) → APPROVED (human only) → PAYPAL_CREATED
+→ COMPLETED`, with `→ FAILED` branches. Every non-blocked transaction starts
+`AWAITING_APPROVAL`; `APPROVED` is not an initial state and is reachable only
+through an explicit human approval. `BLOCKED`,
 `COMPLETED`, and `FAILED` are terminal. Invalid transitions are rejected and
 audited.
+
+### PayPal Sandbox checkout (`backend/app/api/payguard.py`, `payments/paypal.py`)
+`POST /api/transactions/execute` (APPROVED only) creates a Sandbox order and
+returns PayPal's hosted `approve_url`; the frontend redirects the tab there.
+PayPal returns the buyer to `/paypal/return?token=…`, which calls
+`POST /api/paypal/return`: it records `PAYPAL_BUYER_RETURNED` (PayPal checkout
+approval, distinct from PayGuard's `HUMAN_APPROVED`), captures, and marks
+`COMPLETED` only after verifying the order id, order + capture status and
+amount/currency in PayPal's response. `POST /api/paypal/cancel` records the
+cancellation and keeps `PAYPAL_CREATED` for retry. Recoverable PayPal results
+(`ORDER_NOT_APPROVED`, `INSTRUMENT_DECLINED`, pending capture, network/5xx)
+never mark a transaction `FAILED`. Duplicates are handled by per-transaction
+locks plus stable `PayPal-Request-Id`s; `ORDER_ALREADY_CAPTURED` is confirmed
+with a read-only order lookup. All PayPal calls refuse non-Sandbox base URLs.
 
 ### PayPal integration — Sandbox (`backend/app/payments/paypal.py`)
 The only component with PayPal credentials. OAuth2 client-credentials token,
@@ -121,8 +141,10 @@ The orchestrator never stores a transaction and never touches PayPal. Its
 result reports three separate things: the **policy recommendation**, the
 **payment execution status** (always `NOT_EXECUTED`), and whether **human
 authorization** is required. "Send to Approval Center" hands the mission to the
-existing control-plane flow with an approval threshold of 0, so every
-non-blocked mission waits in the Approval Center for a person to approve it.
+existing control-plane flow with the same budget and approval threshold the
+dry run used, so the stored policy recommendation matches the Supervisor's. The
+control plane creates every non-blocked transaction as Pending approval, so it
+waits in the Approval Center for a person to approve it.
 
 ## Known Limitations
 
@@ -145,3 +167,19 @@ non-blocked mission waits in the Approval Center for a person to approve it.
   analytics are simulated.
 - **The API-key guard is opt-in and disabled by default**, so state-changing
   routes are public in the current demo deployment.
+- **Human approval is not tied to an authenticated approver.** The approve
+  endpoint enforces the lifecycle (only Pending approval → APPROVED, audited as
+  actor `USER`), but it does not verify *who* approved. In the demo deployment
+  anyone who can reach the API can approve. Production use would require real
+  approver authentication and per-user audit identity; this is not a secure
+  production approval feature today.
+- **Checkout locking is per process.** Concurrent requests for the same
+  transaction are serialized in-process (the deployment runs one worker);
+  across processes, PayPal's `PayPal-Request-Id` idempotency prevents duplicate
+  orders/captures within PayPal's idempotency window.
+- **The return/cancel endpoints are unauthenticated in the demo** (same opt-in
+  API-key guard as other state-changing routes). They can only act on an
+  existing order token and always verify with PayPal before completing.
+- **Pre-change local records.** Transactions created before every non-blocked
+  mission required human approval may show `APPROVED` with no `HUMAN_APPROVED`
+  audit event. They are left unchanged (no migration).

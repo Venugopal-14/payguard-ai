@@ -126,12 +126,29 @@ Use PayPal's **Webhook Simulator** (Developer Dashboard -> Webhooks Simulator):
 
 Only after the webhook test passes:
 
-1. In the public UI, create a small mission (e.g. "Buy a USB cable", budget 50).
-2. Agent proposes -> risk -> policy -> (approve if needed) -> **Create PayPal
-   order**.
-3. Approve in PayPal as the **Personal (buyer)** sandbox account.
-4. Capture -> transaction reaches `COMPLETED`; the webhook also reconciles it.
-5. Open the transaction drawer -> Audit tab shows the full lifecycle.
+Prerequisites: backend `FRONTEND_URL` = the frontend's public URL (e.g.
+`https://payguard-frontend-ybl6.onrender.com`) — PayPal's return/cancel
+redirects are built from it — and `PAYPAL_BASE_URL` =
+`https://api-m.sandbox.paypal.com` (the backend refuses anything else).
+
+1. In the public UI, create a small mission (e.g. "Buy a USB cable", budget 5).
+   It is created as **Pending approval**.
+2. Approve it as a human (Missions page or Approval Center).
+3. Click **Pay with PayPal (Sandbox)** (Missions page, or the transaction
+   drawer from **Transactions**). The tab redirects to PayPal's hosted Sandbox
+   checkout.
+4. Sign in as the **Personal (buyer)** Sandbox account and approve.
+5. PayPal redirects to `/paypal/return`; PayGuard captures and verifies the
+   real PayPal response and shows the result (Completed with capture id, or
+   Pending / Declined / Failed with a retry option).
+6. Open the transaction drawer -> Audit tab: `HUMAN_APPROVED`,
+   `ORDER_CREATED`, `PAYPAL_BUYER_RETURNED`, `CAPTURE_VERIFIED`. The
+   `PAYMENT.CAPTURE.COMPLETED` webhook arrives later and is recorded; it never
+   double-completes.
+
+To test cancellation, use the cancel link on the PayPal checkout page: the
+transaction stays `PAYPAL_CREATED` and `/paypal/cancel` offers **Retry
+checkout**.
 
 Do **not** create multiple test payments.
 
