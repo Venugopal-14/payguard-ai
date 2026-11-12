@@ -139,3 +139,42 @@ export async function fraudAnalytics(): Promise<FraudAnalytics> {
   });
   return j<FraudAnalytics>(res);
 }
+
+export type AgentStep = {
+  agent: string;
+  role: string;
+  status: string; // ok | flagged | blocked | incomplete | skipped
+  summary: string;
+  input: Record<string, unknown>;
+  output: Record<string, unknown>;
+  handoff: string;
+  duration_ms: number;
+};
+
+export type OrchestrationResult = {
+  mode: string;
+  mode_label: string;
+  final_decision: string; // policy RECOMMENDATION: APPROVE | NEEDS_APPROVAL | BLOCK | NEEDS_INFO
+  execution_status: string; // NOT_EXECUTED
+  human_authorization: string; // REQUIRED | NOT_APPLICABLE
+  status_line: string;
+  requires_human_approval: boolean;
+  payment_executed: boolean;
+  explanation: string;
+  execution_proposal: Record<string, unknown> | null;
+  steps: AgentStep[];
+};
+
+export async function orchestrate(body: {
+  instruction: string;
+  budget?: number;
+  currency: string;
+  approval_threshold: number;
+}): Promise<OrchestrationResult> {
+  const res = await fetch(`${API_URL}/api/orchestrate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return j<OrchestrationResult>(res);
+}

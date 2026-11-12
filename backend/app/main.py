@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
+from app.api.orchestrator import router as orchestrator_router
 from app.api.payguard import router as payguard_router
 from app.api.webhooks import router as webhooks_router
 from app.core import metrics
@@ -75,6 +76,7 @@ async def _metrics_middleware(request: Request, call_next):
 
 app.include_router(payguard_router)
 app.include_router(webhooks_router)
+app.include_router(orchestrator_router)
 
 
 @app.get("/metrics")

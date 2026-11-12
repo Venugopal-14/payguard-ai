@@ -25,9 +25,11 @@ import {
 } from "./lib/ui";
 import { Badge, Card, RiskGauge, StatusDot } from "./components/primitives";
 import { TransactionDrawer } from "./components/TransactionDrawer";
+import { OrchestratorView } from "./components/OrchestratorView";
 
 type View =
   | "Overview"
+  | "Mission Orchestrator"
   | "Missions"
   | "Approval Center"
   | "Transactions"
@@ -38,6 +40,7 @@ type View =
 
 const NAV: { key: View; icon: string }[] = [
   { key: "Overview", icon: "▦" },
+  { key: "Mission Orchestrator", icon: "⛓" },
   { key: "Missions", icon: "✦" },
   { key: "Approval Center", icon: "◉" },
   { key: "Transactions", icon: "≣" },
@@ -251,6 +254,12 @@ export default function Home() {
               busy={busy} error={error} result={result} txn={txn}
               onPropose={onPropose} onApprove={() => txn && onApprove(txn.id)}
               onExecute={onExecute} onCapture={onCapture}
+            />
+          )}
+          {view === "Mission Orchestrator" && (
+            <OrchestratorView
+              onCreated={() => { refresh(); }}
+              goApproval={() => setView("Approval Center")}
             />
           )}
           {view === "Approval Center" && (
